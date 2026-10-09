@@ -61,9 +61,14 @@ npm run build      # static build in dist/
 npm run preview
 ```
 
-The build is fully static (relative paths), so `dist/` can be hosted anywhere. The included
-`.github/workflows/deploy.yml` publishes to GitHub Pages on pushes to `main` (enable Pages → "GitHub Actions" in the
-repository settings).
+The build is fully static with relative paths, so `dist/` can be hosted anywhere.
+
+### Publishing on GitHub Pages
+
+`.github/workflows/deploy.yml` builds the game and publishes it whenever the repository's default branch changes.
+One-time setup: in the repository go to **Settings → Pages** and set **Source** to **GitHub Actions**. Then push to
+the default branch, or open **Actions → Deploy to GitHub Pages → Run workflow**. The game will be live at
+`https://<user>.github.io/<repo>/`.
 
 ### Project layout
 
