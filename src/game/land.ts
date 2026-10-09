@@ -7,6 +7,7 @@
 import { BUILDABLE, BUILDING_DEFS, FELL_WORK, LEVEL_STONE, LEVEL_WORK, MAP_H, MAP_W } from './data';
 import { derived } from './derived';
 import { getMap, idx, inBounds, isWater, N4, tx, ty, type WorldMap } from './map';
+import { withSearch } from './scratch';
 import type { Building, BuildingId, GameState, Land, LandLayer, Settlement } from './types';
 import { Biome, F, T } from './types';
 
@@ -89,9 +90,18 @@ export function wooded(state: GameState, i: number) {
 
 // ------------------------------------------------------------------ settlements
 
-/** Every settlement's hearth. */
+const hearthMemo = new WeakMap<GameState, { ref: Building[]; n: number; towns: number; list: Building[] }>();
+
+/**
+ * Every settlement's hearth (shared: do not change the list). Hearths are only ever added, together
+ * with their settlement, so the list is kept until the buildings or the settlements change in number.
+ */
 export function hearths(state: GameState): Building[] {
-  return state.buildings.filter((b) => b.type === 'campfire');
+  const m = hearthMemo.get(state);
+  if (m && m.ref === state.buildings && m.n === state.buildings.length && m.towns === state.towns.length) return m.list;
+  const list = state.buildings.filter((b) => b.type === 'campfire');
+  hearthMemo.set(state, { ref: state.buildings, n: state.buildings.length, towns: state.towns.length, list });
+  return list;
 }
 
 /** The capital, where the realm began. */
@@ -106,19 +116,43 @@ export function townById(state: GameState, id: number | undefined): Settlement |
 /** A settlement's hearth (the capital's when none is given). */
 export function hearthOf(state: GameState, town?: number): Building {
   const id = town ?? state.towns[0]?.id;
-  for (const b of state.buildings) if (b.type === 'campfire' && (b.town ?? state.towns[0]?.id) === id) return b;
-  return state.buildings.find((b) => b.type === 'campfire') ?? state.buildings[0];
+  const hs = hearths(state);
+  for (const b of hs) if ((b.town ?? state.towns[0]?.id) === id) return b;
+  return hs[0] ?? state.buildings[0];
+}
+
+const GREEN = 1;
+const STREET = 2;
+const greenMemo = new WeakMap<GameState, { hs: Building[]; m: Uint8Array }>();
+
+/** The greens around the hearths and the ways out of them, as bit flags per tile (only where the ground is open). */
+function greensAndStreets(state: GameState): Uint8Array {
+  const hs = hearths(state);
+  const memo = greenMemo.get(state);
+  if (memo && memo.hs === hs) return memo.m;
+  const map = getMap(state.seed);
+  const m = new Uint8Array(MAP_W * MAP_H);
+  const mark = (x: number, y: number, bit: number) => {
+    if (!inBounds(x, y)) return;
+    const i = idx(x, y);
+    if (!blocked(map, i)) m[i] |= bit;
+  };
+  for (const h of hs) {
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) mark(h.x + dx, h.y + dy, GREEN);
+    for (let k = 2; k <= 6; k++) {
+      mark(h.x + k, h.y, STREET);
+      mark(h.x - k, h.y, STREET);
+      mark(h.x, h.y + k, STREET);
+      mark(h.x, h.y - k, STREET);
+    }
+  }
+  greenMemo.set(state, { hs, m });
+  return m;
 }
 
 /** The open village green around a hearth: never built on, always part of the road network. */
 export function isGreen(state: GameState, i: number) {
-  const x = tx(i);
-  const y = ty(i);
-  for (const h of state.buildings) {
-    if (h.type !== 'campfire') continue;
-    if (Math.max(Math.abs(x - h.x), Math.abs(y - h.y)) <= 1) return !blocked(getMap(state.seed), i);
-  }
-  return false;
+  return (greensAndStreets(state)[i] & GREEN) !== 0;
 }
 
 /**
@@ -126,15 +160,7 @@ export function isGreen(state: GameState, i: number) {
  * clear of buildings so homes can never wall a hearth in, and roads like to follow them.
  */
 export function isStreet(state: GameState, i: number) {
-  const x = tx(i);
-  const y = ty(i);
-  for (const h of state.buildings) {
-    if (h.type !== 'campfire') continue;
-    const dx = Math.abs(x - h.x);
-    const dy = Math.abs(y - h.y);
-    if ((dx === 0 || dy === 0) && dx + dy >= 2 && dx + dy <= 6) return !blocked(getMap(state.seed), i);
-  }
-  return false;
+  return (greensAndStreets(state)[i] & STREET) !== 0;
 }
 
 // ------------------------------------------------------------------ footprints
@@ -176,6 +202,31 @@ export function ringOf(x: number, y: number, w: number, h: number): [number, num
 /** Whether a ring cell is a corner (touches the footprint only diagonally). */
 export function ringCorner(x: number, y: number, w: number, h: number, cx: number, cy: number) {
   return (cx === x - 1 || cx === x + w) && (cy === y - 1 || cy === y + h);
+}
+
+export interface RingOffsets {
+  /** Offsets from the footprint's top-left corner, in `ringOf` order. */
+  dx: Int8Array;
+  dy: Int8Array;
+  /** 1 where the cell is a corner. */
+  corner: Uint8Array;
+}
+
+const ringCache = new Map<number, RingOffsets>();
+
+/** The ring around a w×h footprint as offsets, worked out once per size (shared: do not change). */
+export function ringOffsets(w: number, h: number): RingOffsets {
+  const key = w * 64 + h;
+  let r = ringCache.get(key);
+  if (r) return r;
+  const cells = ringOf(0, 0, w, h);
+  r = {
+    dx: Int8Array.from(cells, (c) => c[0]),
+    dy: Int8Array.from(cells, (c) => c[1]),
+    corner: Uint8Array.from(cells, (c) => (ringCorner(0, 0, w, h, c[0], c[1]) ? 1 : 0)),
+  };
+  ringCache.set(key, r);
+  return r;
 }
 
 // ------------------------------------------------------------------ ground
@@ -303,15 +354,37 @@ export function prepareSite(state: GameState, b: Building, work: number): { used
 
 // ------------------------------------------------------------------ catchments
 
-const catchmentMemo = new Map<string, number[]>();
+const catchmentMemo = new Map<number, Map<number, number[]>>();
+const NO_CATCHMENT: number[] = [];
+
+/** Which buildings draw on which layer of the land. */
+function drawsOn(type: BuildingId, layer: LandLayer) {
+  switch (layer) {
+    case 'wood':
+      return type === 'campfire' || type === 'lumber';
+    case 'life':
+      return type === 'campfire' || type === 'lodge';
+    case 'stone':
+      return type === 'quarry';
+    case 'ore':
+      return type === 'mine';
+  }
+}
 
 /** Where a building's workers take their resource from, nearest (or richest) first. (Shared: do not change the list.) */
 export function catchmentAt(state: GameState, type: BuildingId, bx: number, by: number, layer: LandLayer): number[] {
-  const key = `${state.seed}:${type}:${bx}:${by}:${layer}`;
-  let c = catchmentMemo.get(key);
+  if (!drawsOn(type, layer)) return NO_CATCHMENT;
+  let memo = catchmentMemo.get(state.seed);
+  if (!memo) {
+    if (catchmentMemo.size >= 6) catchmentMemo.delete(catchmentMemo.keys().next().value!);
+    catchmentMemo.set(state.seed, (memo = new Map()));
+  }
+  // Only one kind of building draws on each layer from a spot, but hearths draw on two.
+  const key = (idx(bx, by) * 4 + LAYERS.indexOf(layer)) * 2 + (type === 'campfire' ? 1 : 0);
+  let c = memo.get(key);
   if (!c) {
-    if (catchmentMemo.size > 50000) catchmentMemo.clear();
-    catchmentMemo.set(key, (c = findCatchment(state, type, bx, by, layer)));
+    if (memo.size > 50000) memo.clear();
+    memo.set(key, (c = findCatchment(state, type, bx, by, layer)));
   }
   return c;
 }
@@ -380,6 +453,45 @@ function setStock(state: GameState, layer: LandLayer, i: number, v: number) {
   const after = v < 0.01 ? 0 : Math.min(max, v);
   state.land[layer][i] = after;
   if (crossed(layer, before, after, max)) state.landEpoch++;
+  if (layer === 'wood' && after < max) {
+    const low = lowWood.get(state.land.wood);
+    if (low && !low.flag[i]) {
+      low.flag[i] = 1;
+      low.list.push(i);
+      low.sorted = false;
+    }
+  }
+}
+
+/**
+ * Forest tiles that are not full grown (or have been built over): the only ones regrowth has to look
+ * at. Kept in tile order, so the woods grow back the same way however the list came about.
+ */
+interface LowWood {
+  flag: Uint8Array;
+  list: number[];
+  sorted: boolean;
+}
+const lowWood = new WeakMap<number[], LowWood>();
+
+function lowWoodOf(state: GameState): LowWood {
+  const wood = state.land.wood;
+  let low = lowWood.get(wood);
+  if (!low) {
+    const m = landMax(state.seed);
+    low = { flag: new Uint8Array(MAP_W * MAP_H), list: [], sorted: true };
+    for (const i of m.forestTiles)
+      if (wood[i] < m.wood[i]) {
+        low.flag[i] = 1;
+        low.list.push(i);
+      }
+    lowWood.set(wood, low);
+  }
+  if (!low.sorted) {
+    low.list.sort((a, b) => a - b);
+    low.sorted = true;
+  }
+  return low;
 }
 
 /**
@@ -430,9 +542,19 @@ export function growLand(
   const map = getMap(state.seed);
   const wood = state.land.wood;
   const winter = season === 3 ? 0.25 : 1;
-  for (const i of m.forestTiles) {
+  // Untouched forest has nothing to do; tiles grown back in full drop off the list.
+  const low = lowWoodOf(state);
+  const list = low.list;
+  let keep = 0;
+  for (let k = 0; k < list.length; k++) {
+    const i = list[k];
     const max = m.wood[i];
     const v = wood[i];
+    if (v >= max && !opts.occupied[i]) {
+      low.flag[i] = 0;
+      continue;
+    }
+    list[keep++] = i;
     if (opts.occupied[i] && !opts.trail[i]) {
       // Trees on a building site stand until the builders fell them; elsewhere they are gone for good.
       if (v && !opts.sites[i]) setStock(state, 'wood', i, 0);
@@ -449,6 +571,7 @@ export function growLand(
     const climate = b === Biome.Tropical ? 1.5 : b === Biome.Boreal ? 0.7 : 1;
     setStock(state, 'wood', i, Math.min(cap, v + rate * max * 0.025 * winter * opts.regrow * climate));
   }
+  list.length = keep;
   const life = state.land.life;
   for (const i of m.lifeTiles) {
     const max = m.life[i];
@@ -474,11 +597,14 @@ function seedsNearby(state: GameState, i: number) {
   return false;
 }
 
-/** Fell whatever still grows on a tile (when a building or road takes it), adding the timber to the stores. */
-export function clearTile(state: GameState, i: number) {
+/**
+ * Fell whatever still grows on a tile (when a building or road takes it), adding the timber to the stores.
+ * Pass the wood cap when laying many tiles, so it is not worked out again after every one.
+ */
+export function clearTile(state: GameState, i: number, woodCap?: number) {
   const w = state.land.wood[i];
   if (w > 0) {
-    const cap = derived(state).caps.wood;
+    const cap = woodCap ?? derived(state).caps.wood;
     state.res.wood = Math.max(state.res.wood, Math.min(cap, state.res.wood + w));
     setStock(state, 'wood', i, 0);
   }
@@ -545,17 +671,18 @@ export function computeReach(state: GameState, pass = passableMask(state), area 
     const start = idx(h.x, h.y);
     if (!reach[start]) (reach[start] = 1), queue.push(start);
   }
+  const visit = (j: number) => {
+    if (reach[j] || !pass[j] || !area[j]) return;
+    reach[j] = 1;
+    queue.push(j);
+  };
   for (let q = 0; q < queue.length; q++) {
     const i = queue[q];
-    const x = tx(i);
-    const y = ty(i);
-    for (const [dx, dy] of N4) {
-      if (!inBounds(x + dx, y + dy)) continue;
-      const j = idx(x + dx, y + dy);
-      if (reach[j] || !pass[j] || !area[j]) continue;
-      reach[j] = 1;
-      queue.push(j);
-    }
+    const x = i % MAP_W;
+    if (x + 1 < MAP_W) visit(i + 1);
+    if (x > 0) visit(i - 1);
+    if (i + MAP_W < n) visit(i + MAP_W);
+    if (i >= MAP_W) visit(i - MAP_W);
   }
   return reach;
 }
@@ -646,60 +773,65 @@ export class Heap {
  */
 export function roadPath(state: GameState, fromTiles: number | number[]): number[] | null {
   const map = getMap(state.seed);
-  const n = MAP_W * MAP_H;
-  const net = networkMask(state);
-  const taken = takenMask(state);
+  const d = derived(state);
+  const net = d.network;
+  const taken = d.taken;
+  const maxWood = landMax(state.seed).wood;
   const froms = Array.isArray(fromTiles) ? fromTiles : [fromTiles];
   const own = new Set(froms);
-  const dist = new Float32Array(n).fill(Infinity);
-  const prev = new Int32Array(n).fill(-1);
-  const heap = new Heap();
-  for (const f of froms) {
-    dist[f] = 0;
-    heap.push(f, 0);
-  }
   const step = (j: number) => {
     const t = map.terrain[j];
     const f = map.feature[j];
     if (f === F.Ruins || f === F.Grove) return Infinity;
     let c = t === T.Sand ? 1.2 : t === T.Hills ? 1.7 : 1;
-    if (landMax(state.seed).wood[j]) c = wooded(state, j) ? 3.5 : 1.3;
+    if (maxWood[j]) c = wooded(state, j) ? 3.5 : 1.3;
     if (isStreet(state, j)) c *= 0.5;
     if (f === F.Berries) c += 1.5;
     if (f === F.Ore) c += 4;
     return c;
   };
-  while (heap.size) {
-    const i = heap.pop();
-    if (!own.has(i) && net[i]) {
-      const path: number[] = [];
-      for (let k = prev[i]; k >= 0 && !own.has(k); k = prev[k]) path.push(k);
-      return path.reverse();
+  return withSearch((search) => {
+    const { dist, prev } = search;
+    const heap = new Heap();
+    for (const f of froms) {
+      if (dist[f] === Infinity) search.touch(f);
+      dist[f] = 0;
+      heap.push(f, 0);
     }
-    const x = tx(i);
-    const y = ty(i);
-    for (const [dx, dy] of N4) {
-      if (!inBounds(x + dx, y + dy)) continue;
-      const j = idx(x + dx, y + dy);
-      if (taken[j] || own.has(j)) continue;
-      let c: number;
-      if (net[j]) c = 0.01;
-      else if (blocked(map, j)) continue;
-      else c = step(j);
-      const nd = dist[i] + c;
-      if (nd < dist[j]) {
-        dist[j] = nd;
-        prev[j] = i;
-        heap.push(j, nd);
+    while (heap.size) {
+      const i = heap.pop();
+      if (!own.has(i) && net[i]) {
+        const path: number[] = [];
+        for (let k = prev[i]; k >= 0 && !own.has(k); k = prev[k]) path.push(k);
+        return path.reverse();
+      }
+      const x = tx(i);
+      const y = ty(i);
+      for (const [dx, dy] of N4) {
+        if (!inBounds(x + dx, y + dy)) continue;
+        const j = idx(x + dx, y + dy);
+        if (taken[j] || own.has(j)) continue;
+        let c: number;
+        if (net[j]) c = 0.01;
+        else if (blocked(map, j)) continue;
+        else c = step(j);
+        const nd = dist[i] + c;
+        if (nd < dist[j]) {
+          if (dist[j] === Infinity) search.touch(j);
+          dist[j] = nd;
+          prev[j] = i;
+          heap.push(j, nd);
+        }
       }
     }
-  }
-  return null;
+    return null;
+  });
 }
 
 /** Lay a road: the trees along it are felled and the ground is kept clear for good. A trail it follows becomes road. */
-export function layRoad(state: GameState, tiles: number[]) {
+export function layRoad(state: GameState, tiles: number[], woodCap = derived(state).caps.wood) {
   if (!tiles.length) return;
+  // (Storage does not change with the roads: the cap is looked up once, before the network changes.)
   const have = new Set(state.roads);
   const paved = new Set<number>();
   for (const i of tiles) {
@@ -707,7 +839,7 @@ export function layRoad(state: GameState, tiles: number[]) {
     have.add(i);
     paved.add(i);
     state.roads.push(i);
-    clearTile(state, i);
+    clearTile(state, i, woodCap);
   }
   if (paved.size) state.trails = state.trails.filter((i) => !paved.has(i));
   state.landEpoch++;

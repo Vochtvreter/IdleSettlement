@@ -3,8 +3,9 @@ import { fxMul } from './decisions';
 import { canAfford, derived, pay, refund } from './derived';
 import { Rng } from './rng';
 import { ageOf, eraOf, hasTech, seasonIndex } from './state';
-import { addSettlers, killSettler, log, type TickContext } from './sim';
-import type { ChoiceOption, Cost, GameState, Modifier } from './types';
+import { inParty } from './realm';
+import { addSettlers, careLevel, killSettler, log, type TickContext } from './sim';
+import type { Building, ChoiceOption, Cost, GameState, Modifier, Settler } from './types';
 
 const EVENT_CHANCE = 1 / 26;
 
@@ -26,6 +27,13 @@ function hasMod(state: GameState, id: string) {
 }
 
 const towers = (s: GameState) => derived(s).counts.watchtower ?? 0;
+/** People in their settlements: not on the road with pioneers or out in the wilds with a scouting party. */
+function atHome(s: GameState): Settler[] {
+  const away = inParty(s);
+  return s.settlers.filter((x) => x.town && !away.has(x.id));
+}
+/** A site with work done on it that a fire could undo. */
+const burnable = (b: Building) => !b.done && b.progress > 0 && b.type !== 'monument';
 const freeHousing = (s: GameState) => derived(s).housing - s.settlers.length;
 
 const EVENTS: EventDef[] = [
@@ -112,11 +120,11 @@ const EVENTS: EventDef[] = [
     id: 'sickness',
     weight: (s) => (s.settlers.length >= 16 && !hasMod(s, 'sickness') ? fxMul(s, 'disease') : 0),
     run: (s, ctx, rng) => {
-      const healers = s.settlers.filter((x) => x.job === 'healer').length;
-      const care = Math.min(1, (healers * 12) / s.settlers.length);
+      const care = careLevel(s, s.settlers.filter((x) => x.job === 'healer').length);
       const deaths = Math.max(0, Math.round(rng.range(1, 3.5) * (1 - care * 0.8) * (hasTech(s, 'medicine') ? 0.5 : 1) * Math.min(1.5, fxMul(s, 'disease'))));
       addMod(s, { id: 'sickness', label: 'Fever', effects: { morale: -10 } }, 12);
-      const vulnerable = [...s.settlers].sort((a, b) => Math.abs(ageOf(s, b) - 30) - Math.abs(ageOf(s, a) - 30));
+      // The very young and the old are the most at risk; those away in the wilds escape it.
+      const vulnerable = atHome(s).sort((a, b) => Math.abs(ageOf(s, b) - 30) - Math.abs(ageOf(s, a) - 30));
       for (let k = 0; k < deaths && vulnerable.length; k++) killSettler(s, ctx, vulnerable.shift()!, 'fever');
       log(s, deaths ? `A fever spreads through ${s.name}.${care > 0.3 ? ' Your healers saved many.' : ' Healers would have helped.'}` : 'A fever went around, but your healers nursed everyone back to health.', deaths ? 'bad' : 'good');
     },
@@ -131,13 +139,16 @@ const EVENTS: EventDef[] = [
     },
   },
   {
+    // A timber frame going up catches fire. (The Sunspire is stone and bronze: sparks do it no harm.)
     id: 'fire',
-    weight: (s) => (s.buildings.filter((b) => !b.done).length > 0 ? 0.4 : 0),
-    run: (s) => {
-      const site = s.buildings.find((b) => !b.done);
-      if (!site) return;
-      site.progress = Math.max(0, site.progress * 0.5);
-      log(s, `Sparks from a cookfire set the ${BUILDING_DEFS[site.type].name} construction site alight. Half the work is lost.`, 'bad');
+    weight: (s) => (s.buildings.some(burnable) ? 0.4 : 0),
+    run: (s, _ctx, rng) => {
+      const sites = s.buildings.filter(burnable);
+      if (!sites.length) return;
+      const site = rng.pick(sites);
+      site.progress *= 0.5;
+      const town = s.towns.length > 1 ? s.towns.find((t) => t.id === site.town) : null;
+      log(s, `Sparks from a cookfire set the ${BUILDING_DEFS[site.type].name} going up${town ? ` in ${town.name}` : ''} alight. Half the work on it is lost.`, 'bad');
     },
   },
   // ---- choices
@@ -269,7 +280,7 @@ export function resolveChoice(state: GameState, ctx: TickContext, index: number)
       log(state, 'You paid the raiders, and they left without bloodshed.', 'info');
       break;
     case 'fight': {
-      const defenders = state.settlers.filter((x) => ageOf(state, x) >= 16 && ageOf(state, x) < 50);
+      const defenders = atHome(state).filter((x) => ageOf(state, x) >= 16 && ageOf(state, x) < 50);
       const strength = (0.45 + towers(state) * 0.12 + (hasTech(state, 'iron') ? 0.15 : 0) + (state.res.tools > 20 ? 0.1 : 0)) * fxMul(state, 'defense');
       if (rng.chance(Math.min(0.92, strength))) {
         const loot = 10 + eraOf(state) * 5;

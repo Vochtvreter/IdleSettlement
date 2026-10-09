@@ -1,5 +1,5 @@
 import { BUILDING_DEFS, ERAS, JOB_DEFS, TECH_DEFS, TIERS } from './data';
-import { buildingCount, canAfford, canPlace, derived, invalidate, pay, refund } from './derived';
+import { buildingCount, canAfford, canPlace, derived, invalidate, pay, refund, type PlaceOpts } from './derived';
 import { resolveChoice } from './events';
 import { footprint, layRoad, prepNeeded, roadPath } from './land';
 import { idx } from './map';
@@ -24,10 +24,11 @@ export function buildingAvailability(state: GameState, type: BuildingId): Action
   return { ok: true };
 }
 
-export function placeBuilding(state: GameState, type: BuildingId, tile: number, x: number, y: number): ActionResult {
+export function placeBuilding(state: GameState, type: BuildingId, tile: number, x: number, y: number, opts: PlaceOpts = {}): ActionResult {
   const avail = buildingAvailability(state, type);
   if (!avail.ok) return avail;
-  const check = canPlace(state, type, tile);
+  const d = derived(state);
+  const check = canPlace(state, type, tile, d, opts);
   if (!check.ok) return check;
   // Every building is joined to a hearth by a road; somewhere a road cannot reach cannot be built.
   const tiles = footprint(type, x, y)!;
@@ -36,11 +37,12 @@ export function placeBuilding(state: GameState, type: BuildingId, tile: number, 
   pay(state, BUILDING_DEFS[type].cost);
   // Trees on the site stand until the builders fell them, and rock must be levelled: both are queued first.
   const need = prepNeeded(state, type, x, y);
-  const b: Building = { id: state.nextBuildingId++, type, x, y, progress: 0, done: false, town: derived(state).townAt[tile] || state.towns[0]?.id };
+  // (What was worked out before the site was laid out still holds for its settlement and the stores.)
+  const b: Building = { id: state.nextBuildingId++, type, x, y, progress: 0, done: false, town: d.townAt[tile] || state.towns[0]?.id };
   if (need.level > 0) b.prep = need.level;
   if (need.fell + need.level > 0.01) b.prepTotal = need.fell + need.level;
   state.buildings.push(b);
-  layRoad(state, road);
+  layRoad(state, road, d.caps.wood);
   invalidate(state);
   if (state.jobTargets.builder === 0 && derived(state).sites.length === 1) {
     // Helpful nudge: ensure at least one builder is wanted once construction begins.

@@ -6,7 +6,7 @@ import {
   JOB_DEFS,
   PARTY_SIZE,
 } from './data';
-import { census, derived, invalidate, jobUnlocked } from './derived';
+import { census, derived, invalidate, jobUnlocked, recount, type SlotGroup } from './derived';
 import { worksQueue } from './actions';
 import { centerOf, drawFrom, fellLeft, growLand, landFrac, landMax, prepareSite } from './land';
 import { inParty, loseTraveller, paveRoutes, realmDay, setRevealHook, townWithRoom, tradeKnowledge, tradeMorale } from './realm';
@@ -64,9 +64,29 @@ export function productivity(state: GameState) {
   return 0.8 + 0.4 * (state.morale / 100);
 }
 
+/** Jobs whose work goes better with a good tool to hand. */
+export const TOOL_JOBS: readonly JobId[] = JOBS.filter((j) => JOB_DEFS[j].usesTools);
+
+/** Days a tool lasts in use, on average. */
+export const TOOL_LIFE = 1 / 0.006;
+
+/** Workers at jobs that use tools: as many as the council (or you) has asked for. */
+export function toolUsers(state: GameState): number {
+  let n = 0;
+  for (const j of TOOL_JOBS) n += state.jobTargets[j] ?? 0;
+  return n;
+}
+
+/** Share of them with a tool to hand: each one in use takes one from the stores. */
+export function toolShare(state: GameState): number {
+  const users = toolUsers(state);
+  if (users <= 0) return state.res.tools >= 1 ? 1 : 0;
+  return Math.min(1, state.res.tools / users);
+}
+
+/** Output multiplier from tools, for the share of labourers who have them (iron tools are better). */
 export function toolBonus(state: GameState) {
-  if (state.res.tools < 1) return 1;
-  return hasTech(state, 'iron') ? 1.4 : 1.2;
+  return 1 + (hasTech(state, 'iron') ? 0.4 : 0.2) * toolShare(state);
 }
 
 /** Multiplier from techs for a job. */
@@ -140,21 +160,40 @@ export function buildMaterials(state: GameState, type: BuildingId): Partial<Reco
   return Object.fromEntries(Object.entries(m).map(([k, v]) => [k, Math.round((v ?? 0) * f)]));
 }
 
+/** Running totals over a job's slot groups: workers, and their summed multipliers, before each group. */
+const slotTotals = new WeakMap<SlotGroup[], { count: Float64Array; sum: Float64Array }>();
+
+function totalsOf(groups: SlotGroup[]) {
+  let t = slotTotals.get(groups);
+  if (t) return t;
+  const count = new Float64Array(groups.length + 1);
+  const sum = new Float64Array(groups.length + 1);
+  for (let k = 0; k < groups.length; k++) {
+    count[k + 1] = count[k] + groups[k].count;
+    sum[k + 1] = sum[k] + groups[k].count * groups[k].mult;
+  }
+  slotTotals.set(groups, (t = { count, sum }));
+  return t;
+}
+
 /** Average building multiplier for the first n workers of a job (best buildings fill first). */
 export function slotMult(state: GameState, j: JobId, n: number): number {
   if (n <= 0) return 1;
   const groups = derived(state).slotGroups[j];
   if (!groups.length) return 1;
-  let left = n;
-  let sum = 0;
-  for (const g of groups) {
-    const take = Math.min(left, g.count);
-    sum += take * g.mult;
-    left -= take;
-    if (!left) break;
+  const { count, sum } = totalsOf(groups);
+  // The last group that fills completely.
+  let lo = 0;
+  let hi = groups.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (count[mid] <= n) lo = mid;
+    else hi = mid - 1;
   }
-  sum += left; // overflow (should not happen with slot caps)
-  return sum / n;
+  const left = n - count[lo];
+  // Overflow past every slot (should not happen with slot caps) counts as plain work.
+  const total = lo < groups.length ? sum[lo] + left * groups[lo].mult : sum[lo] + left;
+  return total / n;
 }
 
 /**
@@ -396,12 +435,16 @@ export function tick(state: GameState, ctx: TickContext) {
     // Gatherers: the open land feeds a few; berry thickets and fishing waters feed more until picked out.
     const n = jobs.gatherer;
     const fo = forage(state);
+    const per = out('gatherer', 1) * 1.8;
     const onBase = Math.min(n, fo.base);
     let onFeat = Math.min(n - onBase, fo.feat);
     const over = n - onBase - onFeat;
-    if (onFeat > 0) onFeat = drawFrom(state, 'life', fo.tiles, onFeat * 0.8) / 0.8;
-    const eff = onBase + onFeat + Math.max(0, over) * 0.4;
-    produce('food', 'Gatherers', out('gatherer', 1) * eff * 1.8);
+    // Thickets and fishing waters are only picked for what the stores can still take, so they are
+    // not stripped bare for food that would spoil.
+    const open = (onBase + Math.max(0, over) * 0.4) * per;
+    const pick = per > 0 ? Math.min(onFeat, Math.max(0, room('food', foodNeed) - open) / per) : 0;
+    onFeat = pick > 0 ? drawFrom(state, 'life', fo.tiles, pick * 0.8) / 0.8 : 0;
+    produce('food', 'Gatherers', per * (onBase + onFeat + Math.max(0, over) * 0.4));
   }
   produce('food', 'Idle foragers', pop.idle * 0.45 * (SEASON_MULT.gatherer![season]) * prodMult);
   produce('food', 'Farmers', out('farmer', jobs.farmer) * 4.2);
@@ -463,8 +506,9 @@ export function tick(state: GameState, ctx: TickContext) {
   // --- consumption
   add(rates, 'cons', 'food', 'Eating', foodNeed);
   if (heatNeed) add(rates, 'cons', 'wood', 'Firewood', heatNeed);
-  const toolUsers = JOBS.filter((j) => JOB_DEFS[j].usesTools).reduce((s, j) => s + jobs[j], 0);
-  const toolWear = state.res.tools >= 1 ? toolUsers * 0.006 * fxMul(state, 'toolWear') : 0;
+  // Tools wear out as they are used: the ones in workers' hands, not those still on the shelves.
+  const inHand = Math.min(state.res.tools, TOOL_JOBS.reduce((s, j) => s + jobs[j], 0));
+  const toolWear = (inHand / TOOL_LIFE) * fxMul(state, 'toolWear');
   if (toolWear) add(rates, 'cons', 'tools', 'Wear', toolWear);
 
   // --- apply
@@ -556,8 +600,18 @@ export function tick(state: GameState, ctx: TickContext) {
     const foodF = state.hunger > 0.05 ? 0.1 : state.res.food < state.settlers.length * 3 ? 0.5 : 1;
     const moraleF = Math.max(0.25, Math.min(1.4, state.morale / 55));
     const rate = (0.3 / DAYS_PER_YEAR) * foodF * moraleF * modMult(state, 'births') * fxMul(state, 'births');
-    const mothers = state.settlers.filter((s) => s.f && s.town && ageOf(state, s) >= 16 && ageOf(state, s) < 42);
+    // A child needs a father as well as a mother at home in the settlement.
+    const away = inParty(state);
+    const mothers: Settler[] = [];
+    const fathers = new Set<number>();
+    for (const s of state.settlers) {
+      if (!s.town || away.has(s.id)) continue;
+      const age = ageOf(state, s);
+      if (s.f && age >= 16 && age < 42) mothers.push(s);
+      else if (!s.f && age >= 16 && age < 60) fathers.add(s.town);
+    }
     for (const mother of mothers) {
+      if (!fathers.has(mother.town)) continue;
       const room = free.get(mother.town) ?? 0;
       const housingF = room <= 0 ? 0 : Math.min(1, room / 3);
       if (!rng.chance(rate * housingF)) continue;
@@ -569,6 +623,7 @@ export function tick(state: GameState, ctx: TickContext) {
       ctx.fx.push({ kind: 'birth', settler: child.id });
       log(state, `${child.name} was born to ${mother.name}.`, 'birth');
     }
+    recount(state);
   }
 
   // --- population: deaths
@@ -632,6 +687,7 @@ export function killSettler(state: GameState, ctx: TickContext, s: Settler, caus
   if (i < 0) return;
   state.settlers.splice(i, 1);
   loseTraveller(state, s.id);
+  recount(state);
   state.stats.deaths++;
   ctx.fx.push({ kind: 'death', settler: s.id });
   const age = Math.floor(ageOf(state, s));
@@ -647,6 +703,7 @@ export function addSettlers(state: GameState, ctx: TickContext, rng: Rng, n: num
     ctx.fx.push({ kind: 'birth', settler: s.id });
   }
   state.stats.immigrants += n;
+  recount(state);
   ctx.fx.push({ kind: 'arrive', count: n });
 }
 

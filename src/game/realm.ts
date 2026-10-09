@@ -29,8 +29,9 @@ import { clearTile, Heap, hearthOf, landMax, layRoad, layTrail, tilesOf, townByI
 import { getMap, idx, inBounds, isSea, isWater, N4, N8, tx, ty } from './map';
 import { placeName } from './names';
 import { Rng } from './rng';
+import { withSearch } from './scratch';
 import { ageOf, eraOf, hasTech, isAdult } from './state';
-import type { BuildingId, Cost, Expedition, FxEvent, GameState, Rates, ResourceId, Settlement, TradeRoute } from './types';
+import type { BuildingId, Cost, Expedition, FxEvent, GameState, Rates, ResourceId, Settlement, Settler, TradeRoute } from './types';
 import { Biome, F, T } from './types';
 
 export type RealmResult = { ok: true } | { ok: false; reason: string };
@@ -351,89 +352,90 @@ function harbourTiles(state: GameState, town: number): Set<number> {
 export function findSites(state: GameState, fromTown: number, opts: { sea?: boolean; maxCost?: number; limit?: number } = {}): SiteChoice[] {
   const map = getMap(state.seed);
   const d = derived(state);
-  const n = MAP_W * MAP_H;
   const values = siteValues(state.seed);
   const home = townById(state, fromTown);
   if (!home) return [];
   const sea = opts.sea ?? (hasTech(state, 'seafaring') && harbourTiles(state, fromTown).size > 0);
   const harbours = sea ? harbourTiles(state, fromTown) : new Set<number>();
   const maxCost = opts.maxCost ?? 160;
-  const dist = new Float32Array(n).fill(Infinity);
-  const prev = new Int32Array(n).fill(-1);
-  const heap = new Heap();
   const start = idx(home.x, home.y);
-  dist[start] = 0;
-  heap.push(start, 0);
   const spacing = (i: number) => state.towns.every((t) => Math.hypot(t.x - tx(i), t.y - ty(i)) >= TOWN_SPACING);
   // Expeditions under way have claimed their destinations.
   const claimed = state.expeditions.filter((e) => e.kind === 'settle').map((e) => e.path[e.path.length - 1]);
   const biomesHeld = new Set(state.towns.map((t) => map.biome[idx(t.x, t.y)]));
   // Pioneers are drawn to riches the realm does not have yet: ore when it has only fields, the sea when it has none.
   const callingsHeld = new Set(state.towns.map((t) => siteCalling(siteProfile(state.seed, idx(t.x, t.y)))));
-  const out: SiteChoice[] = [];
-  const closed = new Uint8Array(n);
-  while (heap.size) {
-    const i = heap.pop();
-    if (closed[i]) continue;
-    closed[i] = 1;
-    const di = dist[i];
-    if (di > maxCost) break;
-    const onSea = isWater(map.terrain[i]) && map.ocean[i];
-    if (!onSea && state.explored[i] && values.at(i) > 0 && state.explored[i] && !d.occupied[i] && !d.territory[i] && spacing(i) && claimed.every((c) => Math.hypot(tx(c) - tx(i), ty(c) - ty(i)) >= TOWN_SPACING)) {
-      let v = values.at(i);
-      if (!biomesHeld.has(map.biome[i])) v += 5;
-      if (map.island[i] !== map.island[start]) v += 3;
-      out.push({ tile: i, path: [], cost: di, value: v, score: v - di * 0.09, sea: false });
-    }
-    const x = tx(i);
-    const y = ty(i);
-    for (const [dx, dy] of N4) {
-      if (!inBounds(x + dx, y + dy)) continue;
-      const j = idx(x + dx, y + dy);
-      if (closed[j]) continue;
-      let c: number;
-      const jSea = map.ocean[j] === 1;
-      if (jSea) {
-        // Only a galley from a harbour puts to sea.
-        if (!sea || (!onSea && !harbours.has(i) && !nextTo(harbours, i))) continue;
-        c = SEA_COST;
-      } else if (onSea) {
-        c = footCost(state, j, d);
-        if (!isFinite(c)) continue;
-        c += LANDING_COST;
-      } else {
-        c = footCost(state, j, d);
-        if (!isFinite(c) && !harbours.has(j)) continue;
-        if (harbours.has(j)) c = 0.5;
+  return withSearch((search) => {
+    const { dist, prev, flag: closed } = search;
+    const heap = new Heap();
+    search.touch(start);
+    dist[start] = 0;
+    heap.push(start, 0);
+    const out: SiteChoice[] = [];
+    while (heap.size) {
+      const i = heap.pop();
+      if (closed[i]) continue;
+      closed[i] = 1;
+      const di = dist[i];
+      if (di > maxCost) break;
+      const onSea = isWater(map.terrain[i]) && map.ocean[i];
+      if (!onSea && state.explored[i] && values.at(i) > 0 && !d.occupied[i] && !d.territory[i] && spacing(i) && claimed.every((c) => Math.hypot(tx(c) - tx(i), ty(c) - ty(i)) >= TOWN_SPACING)) {
+        let v = values.at(i);
+        if (!biomesHeld.has(map.biome[i])) v += 5;
+        if (map.island[i] !== map.island[start]) v += 3;
+        out.push({ tile: i, path: [], cost: di, value: v, score: v - di * 0.09, sea: false });
       }
-      const nd = di + c;
-      if (nd < dist[j]) {
-        dist[j] = nd;
-        prev[j] = i;
-        heap.push(j, nd);
+      const x = tx(i);
+      const y = ty(i);
+      for (const [dx, dy] of N4) {
+        if (!inBounds(x + dx, y + dy)) continue;
+        const j = idx(x + dx, y + dy);
+        if (closed[j]) continue;
+        let c: number;
+        const jSea = map.ocean[j] === 1;
+        if (jSea) {
+          // Only a galley from a harbour puts to sea.
+          if (!sea || (!onSea && !harbours.has(i) && !nextTo(harbours, i))) continue;
+          c = SEA_COST;
+        } else if (onSea) {
+          c = footCost(state, j, d);
+          if (!isFinite(c)) continue;
+          c += LANDING_COST;
+        } else {
+          c = footCost(state, j, d);
+          if (!isFinite(c) && !harbours.has(j)) continue;
+          if (harbours.has(j)) c = 0.5;
+        }
+        const nd = di + c;
+        if (nd < dist[j]) {
+          if (dist[j] === Infinity) search.touch(j);
+          dist[j] = nd;
+          prev[j] = i;
+          heap.push(j, nd);
+        }
       }
     }
-  }
-  out.sort((a, b) => b.score - a.score || a.tile - b.tile);
-  for (const c of out.slice(0, 40))
-    if (!callingsHeld.has(siteCalling(siteProfile(state.seed, c.tile)))) {
-      c.value += 4;
-      c.score += 4;
+    out.sort((a, b) => b.score - a.score || a.tile - b.tile);
+    for (const c of out.slice(0, 40))
+      if (!callingsHeld.has(siteCalling(siteProfile(state.seed, c.tile)))) {
+        c.value += 4;
+        c.score += 4;
+      }
+    out.sort((a, b) => b.score - a.score || a.tile - b.tile);
+    // Keep the choices apart from each other.
+    const best: SiteChoice[] = [];
+    for (const c of out) {
+      if (best.length >= (opts.limit ?? 5)) break;
+      if (best.every((o) => Math.hypot(tx(o.tile) - tx(c.tile), ty(o.tile) - ty(c.tile)) >= 6)) best.push(c);
     }
-  out.sort((a, b) => b.score - a.score || a.tile - b.tile);
-  // Keep the choices apart from each other.
-  const best: SiteChoice[] = [];
-  for (const c of out) {
-    if (best.length >= (opts.limit ?? 5)) break;
-    if (best.every((o) => Math.hypot(tx(o.tile) - tx(c.tile), ty(o.tile) - ty(c.tile)) >= 6)) best.push(c);
-  }
-  for (const s of best) {
-    const path: number[] = [];
-    for (let k = s.tile; k >= 0; k = prev[k]) path.push(k);
-    s.path = path.reverse();
-    s.sea = s.path.some((k) => map.ocean[k] === 1);
-  }
-  return best;
+    for (const s of best) {
+      const path: number[] = [];
+      for (let k = s.tile; k >= 0; k = prev[k]) path.push(k);
+      s.path = path.reverse();
+      s.sea = s.path.some((k) => map.ocean[k] === 1);
+    }
+    return best;
+  });
 }
 
 function nextTo(set: Set<number>, i: number) {
@@ -477,6 +479,20 @@ function ablePioneers(state: GameState, fromTown: number) {
   return able;
 }
 
+/** The youngest of those able, as many women as men (as far as there are both), so the new settlement can grow. */
+function pickParty(able: Settler[], n: number): Settler[] {
+  const women = able.filter((s) => s.f);
+  const men = able.filter((s) => !s.f);
+  const party: Settler[] = [];
+  let w = 0;
+  let m = 0;
+  while (party.length < n && (w < women.length || m < men.length)) {
+    const takeWoman = m >= men.length || (w < women.length && w <= m);
+    party.push(takeWoman ? women[w++] : men[m++]);
+  }
+  return party;
+}
+
 /** Whether a tile can still take a new hearth: free, outside every territory and far enough from other settlements. */
 export function siteFree(state: GameState, tile: number, exceptExpedition?: number) {
   const d = derived(state);
@@ -502,7 +518,7 @@ export function launchPioneers(state: GameState, _ctx: Ctx, fromTown: number, si
   const home0 = townById(state, fromTown);
   if (!home0 || site.path[0] !== idx(home0.x, home0.y)) return { ok: false, reason: 'That way starts from another settlement' };
   if (!siteFree(state, site.tile)) return { ok: false, reason: 'That land has been taken' };
-  const party = ablePioneers(state, fromTown).slice(0, pioneerCount(state));
+  const party = pickParty(ablePioneers(state, fromTown), pioneerCount(state));
   if (party.length < pioneerCount(state)) return { ok: false, reason: 'Too few young adults to make the journey' };
   pay(state, expeditionCost(state, site.sea));
   for (const s of party) {
@@ -600,47 +616,53 @@ export function launchVoyage(state: GameState, fromTown: number): RealmResult {
   if (!canAfford(state, cost)) return { ok: false, reason: 'Not enough supplies' };
   const map = getMap(state.seed);
   // Flood the open sea from the harbour and make for the most promising unknown water.
-  const n = MAP_W * MAP_H;
-  const prev = new Int32Array(n).fill(-1);
-  const dist = new Int32Array(n).fill(-1);
-  const q: number[] = [];
-  for (const h of harbours)
-    for (const [dx, dy] of N4) {
-      const x = tx(h) + dx;
-      const y = ty(h) + dy;
-      if (!inBounds(x, y)) continue;
-      const j = idx(x, y);
-      if (map.ocean[j] && dist[j] < 0) (dist[j] = 0), q.push(j);
-    }
-  if (!q.length) return { ok: false, reason: 'The harbour has no way to the open sea' };
-  let best = -1;
-  let bestScore = -Infinity;
-  const rng = new Rng(state.rng ^ (state.day * 2654435761));
-  for (let k = 0; k < q.length; k++) {
-    const i = q[k];
-    if (dist[i] > 90) break;
-    if (!state.explored[i] && dist[i] >= 12) {
-      // Unknown water near unknown land is worth the most.
-      let landNear = 0;
-      for (const [dx, dy] of N8) if (inBounds(tx(i) + dx * 3, ty(i) + dy * 3) && !state.explored[idx(tx(i) + dx * 3, ty(i) + dy * 3)] && map.island[idx(tx(i) + dx * 3, ty(i) + dy * 3)] >= 0) landNear++;
-      const sc = landNear * 4 + Math.min(dist[i], 50) * 0.3 + rng.next() * 6;
-      if (sc > bestScore) (bestScore = sc), (best = i);
-    }
-    for (const [dx, dy] of N4) {
-      const x = tx(i) + dx;
-      const y = ty(i) + dy;
-      if (!inBounds(x, y)) continue;
-      const j = idx(x, y);
-      if (!map.ocean[j] || dist[j] >= 0) continue;
-      dist[j] = dist[i] + 1;
-      prev[j] = i;
+  const out = withSearch((search) => {
+    const { dist, prev } = search;
+    const q: number[] = [];
+    const visit = (j: number, from: number, dd: number) => {
+      search.touch(j);
+      dist[j] = dd;
+      prev[j] = from;
       q.push(j);
+    };
+    for (const h of harbours)
+      for (const [dx, dy] of N4) {
+        const x = tx(h) + dx;
+        const y = ty(h) + dy;
+        if (!inBounds(x, y)) continue;
+        const j = idx(x, y);
+        if (map.ocean[j] && dist[j] === Infinity) visit(j, -1, 0);
+      }
+    if (!q.length) return 'landlocked';
+    let best = -1;
+    let bestScore = -Infinity;
+    const rng = new Rng(state.rng ^ (state.day * 2654435761));
+    for (let k = 0; k < q.length; k++) {
+      const i = q[k];
+      if (dist[i] > 90) break;
+      if (!state.explored[i] && dist[i] >= 12) {
+        // Unknown water near unknown land is worth the most.
+        let landNear = 0;
+        for (const [dx, dy] of N8) if (inBounds(tx(i) + dx * 3, ty(i) + dy * 3) && !state.explored[idx(tx(i) + dx * 3, ty(i) + dy * 3)] && map.island[idx(tx(i) + dx * 3, ty(i) + dy * 3)] >= 0) landNear++;
+        const sc = landNear * 4 + Math.min(dist[i], 50) * 0.3 + rng.next() * 6;
+        if (sc > bestScore) (bestScore = sc), (best = i);
+      }
+      for (const [dx, dy] of N4) {
+        const x = tx(i) + dx;
+        const y = ty(i) + dy;
+        if (!inBounds(x, y)) continue;
+        const j = idx(x, y);
+        if (!map.ocean[j] || dist[j] !== Infinity) continue;
+        visit(j, i, dist[i] + 1);
+      }
     }
-  }
-  if (best < 0) return { ok: false, reason: 'No unknown waters within reach' };
-  const out: number[] = [];
-  for (let k = best; k >= 0; k = prev[k]) out.push(k);
-  out.reverse();
+    if (best < 0) return null;
+    const path: number[] = [];
+    for (let k = best; k >= 0; k = prev[k]) path.push(k);
+    return path.reverse();
+  });
+  if (out === 'landlocked') return { ok: false, reason: 'The harbour has no way to the open sea' };
+  if (!out) return { ok: false, reason: 'No unknown waters within reach' };
   pay(state, cost);
   // There and back again.
   const path = [...out, ...out.slice(0, -1).reverse()];
@@ -742,16 +764,23 @@ function hasRoute(state: GameState, a: number, b: number) {
   return state.routes.some((r) => (r.a === a && r.b === b) || (r.a === b && r.b === a));
 }
 
-/** The sea lane between two settlements' harbours, or null. */
-function seaPath(state: GameState, a: number, b: number): number[] | null {
-  const map = getMap(state.seed);
-  const ha = harbourTiles(state, a);
-  const hb = harbourTiles(state, b);
+/** Sea lanes already charted, by the harbours at either end (the sea itself never changes). */
+const laneMemo = new Map<string, number[] | null>();
+
+/** The sea lane between two settlements' harbours, or null. (Shared: do not change the path.) */
+function seaPath(state: GameState, ha: Set<number>, hb: Set<number>): number[] | null {
   if (!ha.size || !hb.size) return null;
-  const n = MAP_W * MAP_H;
-  const prev = new Int32Array(n).fill(-1);
-  const seen = new Uint8Array(n);
-  const q: number[] = [];
+  const key = `${state.seed}:${[...ha].join(',')}|${[...hb].join(',')}`;
+  const known = laneMemo.get(key);
+  if (known !== undefined) return known;
+  if (laneMemo.size > 500) laneMemo.clear();
+  const lane = chartLane(state, ha, hb);
+  laneMemo.set(key, lane);
+  return lane;
+}
+
+function chartLane(state: GameState, ha: Set<number>, hb: Set<number>): number[] | null {
+  const map = getMap(state.seed);
   const goal = new Set<number>();
   const shore = (set: Set<number>, f: (j: number) => void) => {
     for (const h of set)
@@ -761,40 +790,55 @@ function seaPath(state: GameState, a: number, b: number): number[] | null {
         if (inBounds(x, y) && map.ocean[idx(x, y)]) f(idx(x, y));
       }
   };
-  shore(ha, (j) => {
-    if (!seen[j]) (seen[j] = 1), q.push(j);
-  });
   shore(hb, (j) => goal.add(j));
-  for (let k = 0; k < q.length; k++) {
-    const i = q[k];
-    if (goal.has(i)) {
-      const path: number[] = [];
-      for (let p = i; p >= 0; p = prev[p]) path.push(p);
-      return path.reverse();
-    }
-    for (const [dx, dy] of N4) {
-      const x = tx(i) + dx;
-      const y = ty(i) + dy;
-      if (!inBounds(x, y)) continue;
-      const j = idx(x, y);
-      if (seen[j] || !map.ocean[j]) continue;
+  return withSearch((search) => {
+    const { prev, flag: seen } = search;
+    const q: number[] = [];
+    const visit = (j: number, from: number) => {
+      search.touch(j);
       seen[j] = 1;
-      prev[j] = i;
+      prev[j] = from;
       q.push(j);
+    };
+    shore(ha, (j) => {
+      if (!seen[j]) visit(j, -1);
+    });
+    for (let k = 0; k < q.length; k++) {
+      const i = q[k];
+      if (goal.has(i)) {
+        const path: number[] = [];
+        for (let p = i; p >= 0; p = prev[p]) path.push(p);
+        return path.reverse();
+      }
+      for (const [dx, dy] of N4) {
+        const x = tx(i) + dx;
+        const y = ty(i) + dy;
+        if (!inBounds(x, y)) continue;
+        const j = idx(x, y);
+        if (seen[j] || !map.ocean[j]) continue;
+        visit(j, i);
+      }
     }
-  }
-  return null;
+    return null;
+  });
 }
 
 /** Every pair of settlements a sea trade route could join, and whether it can be opened now. (Land routes grow by themselves: see `growTraffic`.) */
 export function routeOptions(state: GameState): RouteOption[] {
   const out: RouteOption[] = [];
+  const ports = new Map<number, Set<number>>();
+  for (const b of state.buildings) {
+    if (b.type !== 'harbour' || !b.done || b.town === undefined) continue;
+    if (!ports.has(b.town)) ports.set(b.town, new Set());
+    for (const i of tilesOf(b)) ports.get(b.town)!.add(i);
+  }
+  const none = new Set<number>();
   for (let i = 0; i < state.towns.length; i++)
     for (let j = i + 1; j < state.towns.length; j++) {
       const a = state.towns[i];
       const b = state.towns[j];
       if (hasRoute(state, a.id, b.id)) continue;
-      const path = seaPath(state, a.id, b.id);
+      const path = seaPath(state, ports.get(a.id) ?? none, ports.get(b.id) ?? none);
       const cost = GALLEY_COST;
       let reason: string | undefined;
       if (!path) reason = 'Sea routes need a harbour at both ends, on the same sea';
@@ -811,7 +855,7 @@ export function openRoute(state: GameState, ctx: Ctx, a: number, b: number): Rea
   if (!opt) return { ok: false, reason: 'No route possible' };
   if (!opt.ok) return { ok: false, reason: opt.reason ?? 'Not possible' };
   pay(state, opt.cost);
-  const r: TradeRoute = { id: state.nextRouteId++, a: opt.a, b: opt.b, kind: opt.kind, path: opt.path, opened: state.day, paved: 0 };
+  const r: TradeRoute = { id: state.nextRouteId++, a: opt.a, b: opt.b, kind: opt.kind, path: opt.path.slice(), opened: state.day, paved: 0 };
   state.routes.push(r);
   invalidate(state);
   ctx.fx.push({ kind: 'route', route: r.id });
@@ -911,11 +955,7 @@ export function trafficFlow(state: GameState, a: Settlement, b: Settlement): num
 export function desirePath(state: GameState, a: Settlement, b: Settlement): number[] | null {
   const map = getMap(state.seed);
   const d = derived(state);
-  const n = MAP_W * MAP_H;
   const roads = new Set(state.roads);
-  const dist = new Float32Array(n).fill(Infinity);
-  const prev = new Int32Array(n).fill(-1);
-  const heap = new Heap();
   const start = idx(a.x, a.y);
   const goal = idx(b.x, b.y);
   const step = (j: number) => {
@@ -925,30 +965,36 @@ export function desirePath(state: GameState, a: Settlement, b: Settlement): numb
     const c = SCOUT_DAYS[map.terrain[j]] * 4;
     return state.explored[j] ? c : c * 1.3;
   };
-  dist[start] = 0;
-  heap.push(start, 0);
-  while (heap.size) {
-    const i = heap.pop();
-    if (i === goal) {
-      const path: number[] = [];
-      for (let k = goal; k >= 0; k = prev[k]) path.push(k);
-      return path.reverse();
+  return withSearch((search) => {
+    const { dist, prev } = search;
+    const heap = new Heap();
+    search.touch(start);
+    dist[start] = 0;
+    heap.push(start, 0);
+    while (heap.size) {
+      const i = heap.pop();
+      if (i === goal) {
+        const path: number[] = [];
+        for (let k = goal; k >= 0; k = prev[k]) path.push(k);
+        return path.reverse();
+      }
+      const di = dist[i];
+      for (const [dx, dy] of N4) {
+        const x = tx(i) + dx;
+        const y = ty(i) + dy;
+        if (!inBounds(x, y)) continue;
+        const j = idx(x, y);
+        const c = step(j);
+        if (!isFinite(c) || di + c >= dist[j]) continue;
+        if (dist[j] === Infinity) search.touch(j);
+        dist[j] = di + c;
+        prev[j] = i;
+        // A* toward the other hearth: no step is cheaper than a road.
+        heap.push(j, dist[j] + Math.hypot(x - b.x, y - b.y) * 0.3);
+      }
     }
-    const di = dist[i];
-    for (const [dx, dy] of N4) {
-      const x = tx(i) + dx;
-      const y = ty(i) + dy;
-      if (!inBounds(x, y)) continue;
-      const j = idx(x, y);
-      const c = step(j);
-      if (!isFinite(c) || di + c >= dist[j]) continue;
-      dist[j] = di + c;
-      prev[j] = i;
-      // A* toward the other hearth: no step is cheaper than a road.
-      heap.push(j, dist[j] + Math.hypot(x - b.x, y - b.y) * 0.3);
-    }
-  }
-  return null;
+    return null;
+  });
 }
 
 /** Wear a trail along a way: the travellers see the land they cross. */
@@ -1066,10 +1112,14 @@ function councilRealm(state: GameState, ctx: Ctx) {
   const pop = state.settlers.length;
   // Pioneers, when the realm is big enough to spare them.
   const cap = townCap(state);
-  if (policy !== 'consolidate' && state.towns.length < cap && pop >= (policy === 'expand' ? 18 : 24) && state.day % 10 === 0 && state.hunger < 0.02) {
+  if (policy !== 'consolidate' && state.towns.length < cap && pop >= (policy === 'expand' ? 18 : 24) && state.day % 10 === 0 && state.hunger < 0.02 && state.res.food > 80 + pop * 2) {
+    // From the biggest settlements and from any with a harbour to cross the sea from, taking turns: the
+    // land within reach of one may be all settled while another looks out over open country or the sea.
     const c = census(state);
-    const from = [...state.towns].sort((a, b) => (c.adults.get(b.id) ?? 0) - (c.adults.get(a.id) ?? 0))[0];
-    if (from && state.res.food > 80 + pop * 2) autoPioneers(state, ctx, from.id);
+    const byPeople = [...state.towns].sort((a, b) => (c.adults.get(b.id) ?? 0) - (c.adults.get(a.id) ?? 0) || a.id - b.id);
+    const ports = new Set(state.buildings.filter((b) => b.type === 'harbour' && b.done).map((b) => b.town));
+    const from = byPeople.filter((t, k) => (k < 3 || ports.has(t.id)) && pioneerStatus(state, t.id).ok);
+    if (from.length) autoPioneers(state, ctx, from[Math.floor(state.day / 10) % from.length].id);
   }
   // Galleys chart the seas now and then.
   if (hasTech(state, 'seafaring') && state.day % 60 === 0 && state.res.wood > 80) {

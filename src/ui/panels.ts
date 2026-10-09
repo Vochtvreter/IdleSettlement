@@ -22,8 +22,8 @@ import { fellLeft, siteStage, sizeOf } from '../game/land';
 import { getMap, idx, tx, ty } from '../game/map';
 import { expeditionCost, findSites, launchPioneers, launchVoyage, nextTierNeeds, openRoute, pairKey, pioneerStatus, routeIncome, routeOptions, siteCalling, siteProfile, ties, townTitle, type SiteChoice } from '../game/realm';
 import { partyStatus } from '../game/scouting';
-import { ageOf, eraOf, seasonIndex, year } from '../game/state';
-import { buildMaterials, buildWork, careLevel, gathererCapacity, materialLimit, moraleTarget, popSummary, productivity, toolBonus, yieldEff } from '../game/sim';
+import { ageOf, eraOf, hasTech, seasonIndex, year } from '../game/state';
+import { buildMaterials, buildWork, careLevel, gathererCapacity, materialLimit, moraleTarget, popSummary, productivity, TOOL_LIFE, toolBonus, toolShare, toolUsers, yieldEff } from '../game/sim';
 import { councilWish } from '../game/council';
 import { PIN_UNLOCK } from '../game/decisions';
 import { tabRevealed, type Tab } from '../game/reveal';
@@ -377,7 +377,10 @@ export class Panels {
     };
     const eff = yieldEff(s, j);
     if (landNote[j] && eff < 0.95 && popSummary(s).jobs[j] > 0) extra += `<div class="sep"></div><span style="color:var(--bad)">Only ${Math.round(eff * 100)}% of a full yield: ${landNote[j]}.</span>`;
-    if (def.usesTools) extra += `<div class="sep"></div><span class="muted">Tools in stock: ${toolBonus(s) > 1 ? `<b style="color:var(--good)">+${Math.round((toolBonus(s) - 1) * 100)}% output</b>` : 'none (no bonus)'}</span>`;
+    if (def.usesTools) {
+      const share = toolShare(s);
+      extra += `<div class="sep"></div><span class="muted">Tools: ${share > 0 ? `${Math.round(share * 100)}% of labourers have one, <b style="color:var(--good)">+${Math.round((toolBonus(s) - 1) * 100)}% output</b>` : 'none in stock (no bonus)'}</span>`;
+    }
     if (def.input) extra += `<div class="sep"></div><span class="muted">Consumes ${Object.entries(def.input).map(([k, v]) => `${v} ${k}`).join(' + ')} per smith per day.</span>`;
     return `<h4>${def.name}</h4>${def.desc}${extra}<div class="sep"></div><span class="muted">Morale: ×${productivity(s).toFixed(2)} output</span>`;
   }
@@ -897,7 +900,10 @@ export function resourceTip(game: Game, r: ResourceId): string {
   let note = '';
   if (r === 'food' && seasonIndex(s.day) !== 3) note = '<div class="sep"></div><span class="muted">Winter brings poor foraging and no harvest — keep a stockpile.</span>';
   if (r === 'wood') note = '<div class="sep"></div><span class="muted">In winter everyone burns firewood to stay warm.</span>';
-  if (r === 'tools') note = `<div class="sep"></div><span class="muted">${toolBonus(s) > 1 ? `Labourers +${Math.round((toolBonus(s) - 1) * 100)}% while tools are in stock.` : 'Labourers get a bonus while tools are in stock.'}</span>`;
+  if (r === 'tools') {
+    const users = toolUsers(s);
+    note = `<div class="sep"></div><span class="muted">Each labourer with a tool works ${hasTech(s, 'iron') ? '40' : '20'}% better, and tools in use wear out in about ${Math.round(TOOL_LIFE / DAYS_PER_YEAR)} years. ${users ? `${Math.round(toolShare(s) * 100)}% of ${users} labourers have one: labourers +${Math.round((toolBonus(s) - 1) * 100)}%.` : ''}</span>`;
+  }
   return `<h4>${def.name} ${fmt(s.res[r])}${isFinite(cap) ? ` / ${fmt(cap)}` : ''}</h4>${def.desc}${lines.length ? '<div class="sep"></div>' + lines.join('') : ''}<div class="sep"></div><div class="tl ${net >= 0 ? 'pos' : 'neg'}"><span>Net per day</span><span>${fmtRate(net)}</span></div>${note}`;
 }
 
