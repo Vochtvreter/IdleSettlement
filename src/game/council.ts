@@ -7,8 +7,9 @@ import { buildingAvailability, placeBuilding, research, setJobTarget, techStatus
 import { BUILDING_DEFS, MAP_H, MAP_W, TECH_DEFS, TECH_ORDER } from './data';
 import { choiceOf, nextPath, pathRequirements, tweak } from './decisions';
 import { canAfford, canPlace, derived } from './derived';
-import { getMap, tx, ty } from './map';
-import { baseRate, foodDemand, jobOutput, popSummary, type TickContext } from './sim';
+import { blocked, catchmentAt, dryLand, hearthOf, layerSum } from './land';
+import { getMap, idx, inBounds, N4, N8, tx, ty } from './map';
+import { baseRate, foodDemand, gathererCapacity, jobOutput, pastureYield, popSummary, yieldEff, type TickContext } from './sim';
 import { eraOf, hasTech, seasonIndex } from './state';
 import type { BuildingId, Cost, GameState, JobId, ResourceId, TechId } from './types';
 import { F, JOBS, T } from './types';
@@ -67,34 +68,191 @@ function councilResearch(state: GameState, ctx: TickContext) {
 
 // ------------------------------------------------------------------ building
 
-function bestTile(state: GameState, type: BuildingId): number | null {
+const HOMES: BuildingId[] = ['hut', 'house'];
+const WORKS: BuildingId[] = ['quarry', 'mine', 'smithy', 'lumber', 'lodge'];
+const FIELDS: BuildingId[] = ['farm', 'pasture'];
+
+/**
+ * How well a tile suits a building, so the settlement grows the way a real one would: homes line the
+ * roads near the hearth, stores and halls sit at its heart, fields spread out over the fertile land
+ * beyond, and camps, quarries and mines go where the timber, stone and ore actually are.
+ */
+function siteScore(state: GameState, type: BuildingId, i: number, mult: number, at: Map<number, BuildingId>, d: ReturnType<typeof derived>): number {
   const map = getMap(state.seed);
-  const hearth = state.buildings.find((b) => b.type === 'campfire')!;
+  const h = hearthOf(state);
+  const x = tx(i);
+  const y = ty(i);
+  const dist = Math.hypot(x - h.x, y - h.y);
+  const around = (types: BuildingId[], n: readonly (readonly [number, number])[] = N8) => {
+    let k = 0;
+    for (const [dx, dy] of n) {
+      const t = at.get(idx(x + dx, y + dy));
+      if (t && inBounds(x + dx, y + dy) && types.includes(t)) k++;
+    }
+    return k;
+  };
+  let roadAdj = false;
+  let free = 0;
+  let water = false;
+  for (const [dx, dy] of N8) {
+    if (!inBounds(x + dx, y + dy)) continue;
+    const j = idx(x + dx, y + dy);
+    const t = map.terrain[j];
+    if (t === T.River || t === T.Water) water = true;
+  }
+  for (const [dx, dy] of N4) {
+    if (!inBounds(x + dx, y + dy)) continue;
+    const j = idx(x + dx, y + dy);
+    if (d.network[j]) roadAdj = true;
+    if (!d.occupied[j] && !blocked(map, j)) free++;
+  }
+  const ter = map.terrain[i];
+  const fertile = water && (ter === T.Grass || ter === T.Meadow);
+  const catchSum = (layer: 'wood' | 'stone' | 'ore' | 'life') => layerSum(state, layer, catchmentAt(state, type, x, y, layer));
+  switch (type) {
+    case 'hut':
+    case 'house':
+      return -dist * 1.1 + (roadAdj ? 5 : 0) + Math.min(2, around(HOMES)) * 1.2 - around([...WORKS, ...FIELDS]) * 2 - (fertile ? 2 : 0) - (free + (roadAdj ? 1 : 0) < 2 ? 3 : 0);
+    case 'storehouse':
+    case 'granary':
+    case 'library':
+    case 'shrine':
+    case 'herbalist':
+      return -dist * 0.8 + (roadAdj ? 4 : 0) - around(WORKS) - (fertile ? 2 : 0) + (type === 'granary' ? around(FIELDS) * 0.8 : 0);
+    case 'smithy':
+      return -dist * 0.5 + (roadAdj ? 3 : 0) - (fertile ? 2 : 0) + around(['mine', 'storehouse']) * 1.5;
+    case 'lumber': {
+      let shared = 0;
+      for (const j of catchmentAt(state, type, x, y, 'wood')) if (d.replant[j]) shared++;
+      return catchSum('wood') / 40 + mult * 3 - dist * 0.25 - shared * 0.6;
+    }
+    case 'lodge':
+      return catchSum('life') / 25 + mult * 4 - dist * 0.3 - around(['lodge'], [[1, 0], [-1, 0], [0, 1], [0, -1], [2, 0], [-2, 0], [0, 2], [0, -2]]) * 4;
+    case 'quarry':
+      return catchSum('stone') / 150 + mult * 3 - dist * 0.3;
+    case 'mine':
+      return catchSum('ore') / 100 + mult * 4 - dist * 0.3;
+    case 'farm':
+      return mult * 10 - Math.abs(dist - 5.5) * 0.7 + around(FIELDS, N4) * 2.5 - around(HOMES) - (dist < 3 ? 8 : 0);
+    case 'pasture':
+      return -Math.abs(dist - 7) * 0.5 + around(FIELDS) * 1.5 - around(HOMES) * 1.5 + (ter === T.Meadow ? 1 : 0) - (fertile ? 1 : 0);
+    case 'watchtower':
+      return (ter === T.Hills ? 3 : 0) + map.elev[i] * 6 + Math.min(dist, 10) * 0.4 - around([...HOMES, ...WORKS, ...FIELDS]);
+    case 'monument':
+      return -Math.abs(dist - 4) + (roadAdj ? 2 : 0) - (fertile ? 1 : 0);
+    default:
+      return -dist * 0.6 + (roadAdj ? 2 : 0);
+  }
+}
+
+function bestTile(state: GameState, type: BuildingId): number | null {
+  if (type === 'bridge') return bridgeTile(state);
   const d = derived(state);
-  let best: number | null = null;
-  let bestScore = -Infinity;
+  const at = new Map<number, BuildingId>();
+  for (const b of state.buildings) at.set(idx(b.x, b.y), b.type);
+  const cands: [number, number][] = [];
   for (let i = 0; i < MAP_W * MAP_H; i++) {
     if (!d.territory[i]) continue;
-    const c = canPlace(state, type, i);
+    const c = canPlace(state, type, i, d);
     if (!c.ok) continue;
-    const dist = Math.hypot(tx(i) - hearth.x, ty(i) - hearth.y);
-    const homey = type === 'hut' || type === 'house';
-    let score = c.mult * 10 - dist * (homey ? 1 : 0.35);
-    // Keep valuable spots free: ore veins for mines, open fields for farms.
-    if (map.feature[i] === F.Ore && type !== 'mine') score -= 30;
-    if (type !== 'farm' && type !== 'pasture' && (map.terrain[i] === T.Grass || map.terrain[i] === T.Meadow) && hasTech(state, 'agriculture')) score -= 1.5;
-    // The Sunspire wants room to be seen: avoid the crowded centre.
-    if (type === 'monument') score = -Math.abs(dist - 4);
-    if (score > bestScore) {
-      bestScore = score;
-      best = i;
+    cands.push([i, siteScore(state, type, i, c.mult, at, d)]);
+  }
+  cands.sort((a, b) => b[1] - a[1] || a[0] - b[0]);
+  return cands.length ? cands[0][0] : null;
+}
+
+/**
+ * Where a bridge would open up the most useful land across a river: a river tile with reachable land
+ * (or a bridge being built) on one bank, and land nobody can yet reach on the other.
+ */
+export function bridgeTile(state: GameState): number | null {
+  if (count(state, 'bridge') >= 8) return null;
+  const map = getMap(state.seed);
+  const d = derived(state);
+  const h = hearthOf(state);
+  const n = MAP_W * MAP_H;
+  // Label the unreachable patches of land and value what they hold inside the territory.
+  const label = new Int32Array(n).fill(-1);
+  const value: number[] = [];
+  const bridgeAt = new Set(state.buildings.filter((b) => b.type === 'bridge').map((b) => idx(b.x, b.y)));
+  const pending = state.buildings.some((b) => b.type === 'bridge' && !b.done);
+  const component = (start: number) => {
+    if (label[start] >= 0) return value[label[start]];
+    const id = value.length;
+    let v = 0;
+    const queue = [start];
+    label[start] = id;
+    for (let q = 0; q < queue.length && q < 600; q++) {
+      const i = queue[q];
+      if (d.territory[i] && state.explored[i]) {
+        v += 1 + (map.feature[i] === F.Ore ? 8 : 0) + (map.feature[i] === F.Game ? 4 : 0) + (map.terrain[i] === T.Hills ? 1 : 0);
+        for (const [dx, dy] of N8) {
+          const xx = tx(i) + dx;
+          const yy = ty(i) + dy;
+          if (inBounds(xx, yy) && (map.terrain[idx(xx, yy)] === T.Mountain || map.terrain[idx(xx, yy)] === T.Hills)) {
+            v += 0.3;
+            break;
+          }
+        }
+      }
+      for (const [dx, dy] of N4) {
+        const xx = tx(i) + dx;
+        const yy = ty(i) + dy;
+        if (!inBounds(xx, yy)) continue;
+        const j = idx(xx, yy);
+        if (label[j] >= 0 || d.reach[j] || blocked(map, j)) continue;
+        label[j] = id;
+        queue.push(j);
+      }
+    }
+    value.push(v);
+    return v;
+  };
+  let best: number | null = null;
+  let bestScore = -Infinity;
+  for (let i = 0; i < n; i++) {
+    if (map.terrain[i] !== T.River || !d.territory[i] || !state.explored[i] || d.occupied[i]) continue;
+    const x = tx(i);
+    const y = ty(i);
+    for (const [dx, dy] of N4) {
+      if (!inBounds(x - dx, y - dy) || !inBounds(x + dx, y + dy)) continue;
+      const near = idx(x - dx, y - dy);
+      const fromBridge = bridgeAt.has(near);
+      if (!fromBridge && !(d.reach[near] && !blocked(map, near))) continue;
+      // While a bridge is going up, only carry on across the same river.
+      if (pending && !fromBridge) continue;
+      let far = idx(x + dx, y + dy);
+      let span = 1;
+      if (map.terrain[far] === T.River && inBounds(x + 2 * dx, y + 2 * dy)) {
+        far = idx(x + 2 * dx, y + 2 * dy);
+        span = 2;
+      }
+      if (!dryLand(map, far) || d.reach[far]) continue;
+      const v = component(far);
+      if (v < 8) continue;
+      const score = Math.min(v, 60) / span - Math.hypot(x - h.x, y - h.y) * 0.8;
+      if (score > bestScore && canPlace(state, 'bridge', i).ok) {
+        bestScore = score;
+        best = i;
+      }
     }
   }
   return best;
 }
 
+/** Whether the best spot for a new camp or lodge has woods or a healthy herd that no other workplace already works. */
+function freshSite(state: GameState, type: 'lumber' | 'lodge') {
+  const t = bestTile(state, type);
+  if (t === null) return false;
+  const layer = type === 'lumber' ? 'wood' : 'life';
+  const worked = new Set<number>();
+  for (const tiles of derived(state).catchments[layer].values()) for (const i of tiles) worked.add(i);
+  const fresh = catchmentAt(state, type, tx(t), ty(t), layer).filter((i) => !worked.has(i));
+  return layerSum(state, layer, fresh) >= (type === 'lumber' ? 300 : 60);
+}
+
 function count(state: GameState, t: BuildingId) {
-  return state.buildings.filter((b) => b.type === t).length;
+  return state.buildings.filter((b) => b.type === t && !b.spent).length;
 }
 
 function fitsCaps(state: GameState, cost: Cost) {
@@ -164,7 +322,7 @@ export function councilWish(state: GameState): { type: BuildingId; waiting: bool
     const w = wish('storehouse');
     if (w && !w.waiting) return w;
   }
-  if (full('food') && hasTech(state, 'pottery') && seasonIndex(state.day) < 3) {
+  if (full('food') && hasTech(state, 'pottery') && seasonIndex(state.day) < 3 && count(state, 'granary') < 2 + eraOf(state) * 2) {
     const w = wish('granary');
     if (w && !w.waiting) return w;
   }
@@ -176,15 +334,31 @@ export function councilWish(state: GameState): { type: BuildingId; waiting: bool
       if (w) return w;
     }
   }
-  // 5. The focus plan.
+  // 5. Rivers in the way of good land.
+  if (pop >= 10 && state.res.wood >= (BUILDING_DEFS.bridge.cost.wood ?? 0) + 10) {
+    const w = wish('bridge');
+    if (w && !w.waiting) return w;
+  }
+  // 6. Woods felled bare or herds hunted thin: open a camp somewhere richer.
+  if (yieldEff(state, 'woodcutter') < 0.6 && state.res.wood < d.caps.wood * 0.5 && count(state, 'lumber') < 6) {
+    const w = wish('lumber');
+    if (w && freshSite(state, 'lumber')) return w;
+  }
+  if (yieldEff(state, 'hunter') < 0.6 && count(state, 'lodge') < 4) {
+    const w = wish('lodge');
+    if (w && !w.waiting && freshSite(state, 'lodge')) return w;
+  }
+  // 7. The focus plan.
   for (const [t, n] of PLANS[focusOf(state)]) {
     if (count(state, t) >= n) continue;
     const w = wish(t);
     if (!w) continue;
+    // A second camp or lodge only where the land is not already being worked.
+    if ((t === 'lumber' || t === 'lodge') && count(state, t) >= 1 && !freshSite(state, t)) continue;
     return w;
   }
-  // 6. Late game: keep adding storage so the Sunspire's appetite can be met.
-  if (hasTech(state, 'architecture')) {
+  // 8. Late game: keep adding storage so the Sunspire's appetite can be met.
+  if (hasTech(state, 'architecture') && count(state, 'storehouse') < 8 + eraOf(state) * 2) {
     const w = wish('storehouse');
     if (w) return w;
   }
@@ -216,8 +390,12 @@ const FOCUS_SPLIT: Record<Focus, Partial<Record<JobId, number>>> = {
 };
 
 /** Average daily food from one more worker of a job, given current bonuses. */
-function foodPer(state: GameState, j: JobId, n: number) {
-  return (jobOutput(state, j, Math.max(1, n + 1), -1) / Math.max(1, n + 1)) * baseRate(j);
+/** Food from one more worker of a job: hunters past what the herds can bear catch only small game, gatherers past what the land can feed find little. */
+function foodPer(state: GameState, j: JobId, n: number, forageCap: number) {
+  const avg = (jobOutput(state, j, Math.max(1, n + 1), -1) / Math.max(1, n + 1)) * baseRate(j);
+  if (j === 'hunter') return avg * (yieldEff(state, j) >= 0.97 ? 1 : 0.4);
+  if (j === 'gatherer') return avg * (n + 1 > forageCap ? 0.4 : 1);
+  return avg;
 }
 
 function councilJobs(state: GameState) {
@@ -245,17 +423,28 @@ function councilJobs(state: GameState) {
   let base = full ? 0.8 : stock < need * 5 ? 1.15 : 1;
   if (state.hunger > 0.02) base = 2;
   if (season === 3) base = stock < need * 3 ? Math.max(base, 1.4) : Math.min(base, 1);
-  const pasture = (d.counts.pasture ?? 0) * 1.4;
+  const pasture = pastureYield(state, season).food;
   const foodCap = Math.max(Math.min(4, ps.adults), Math.ceil(ps.adults * (state.hunger > 0.02 || stock < need * 4 ? 0.9 : 0.7)));
   let produced = pasture;
   let foodWorkers = 0;
+  const forageCap = gathererCapacity(state);
   const fillFood = (goal: number) => {
-    for (const j of ['farmer', 'hunter', 'gatherer'] as JobId[]) {
-      while (produced < goal && foodWorkers < foodCap && target[j] < d.slots[j] && adults > 0) {
-        produced += foodPer(state, j, target[j]);
-        take(j, 1);
-        foodWorkers++;
+    // One worker at a time, to whichever food job yields most right now.
+    while (produced < goal && foodWorkers < foodCap && adults > 0) {
+      let best: JobId | null = null;
+      let bestV = 0;
+      for (const j of ['farmer', 'hunter', 'gatherer'] as JobId[]) {
+        if (target[j] >= d.slots[j]) continue;
+        const v = foodPer(state, j, target[j], forageCap);
+        if (v > bestV + 1e-9) {
+          bestV = v;
+          best = j;
+        }
       }
+      if (!best) break;
+      produced += bestV;
+      take(best, 1);
+      foodWorkers++;
     }
   };
   fillFood(need * base);
@@ -294,5 +483,5 @@ function councilJobs(state: GameState) {
 }
 
 function foodPerResource(state: GameState, j: JobId) {
-  return Math.max(0.1, (jobOutput(state, j, 1, -1) || 1) * baseRate(j));
+  return Math.max(0.1, (jobOutput(state, j, 1, -1) || 1) * baseRate(j) * Math.max(0.2, yieldEff(state, j)));
 }

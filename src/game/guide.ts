@@ -139,6 +139,13 @@ export const GUIDE: GuideStep[] = [
     when: (s) => tabRevealed(s, 'build'),
     tab: 'build',
   },
+  {
+    id: 'land',
+    title: 'The land is not endless',
+    text: 'What your people take, the land gives back slowly or not at all. Felled woods regrow in a few years, fastest where a <b>lumber camp</b> replants them. Herds hunted too hard dwindle, and <b>pastures</b> breed animals instead. Quarries and mines run out for good, so the council opens new ones further out and builds <b>bridges</b> to reach land across rivers.<br><br>Click any tile to see what it still holds.',
+    after: 'build',
+    when: (s) => s.buildings.some((b) => b.spent) || (s.eff.woodcutter ?? 1) < 0.7 || (s.eff.hunter ?? 1) < 0.7,
+  },
   // ------------------------------------------------ after the first milestones
   {
     id: 'policies',

@@ -182,9 +182,9 @@ export const DECISIONS: DecisionDef[] = [
     unlock: 5,
     initial: 'normal',
     options: [
-      { id: 'clearcut', name: 'Clear-cut', desc: 'Woodcutters +35%, morale −4.', fx: { woodcutter: 1.35, morale: -4 } },
-      { id: 'normal', name: 'Normal', desc: 'No change.', fx: {} },
-      { id: 'sacred', name: 'Sacred Woods', desc: 'Woodcutters −10%, hunters +10%, morale +4.', fx: { woodcutter: 0.9, hunter: 1.1, morale: 4 } },
+      { id: 'clearcut', name: 'Clear-cut', desc: 'Woodcutters +35%, but nobody replants: felled forest only creeps back on its own. Morale −4.', fx: { woodcutter: 1.35, replant: 0, morale: -4 } },
+      { id: 'normal', name: 'Replanting', desc: 'Lumber camps replant what they fell.', fx: {} },
+      { id: 'sacred', name: 'Sacred Woods', desc: 'Woodcutters −10%, forests and herds regrow 50% faster, hunters +10%, morale +4.', fx: { woodcutter: 0.9, regrow: 1.5, hunter: 1.1, morale: 4 } },
     ],
   },
   {

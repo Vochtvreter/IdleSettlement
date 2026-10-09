@@ -1,5 +1,9 @@
-import { ADULT_AGE, DAYS_PER_YEAR, ELDER_AGE, JOB_DEFS } from '../game/data';
+import { ADULT_AGE, DAYS_PER_YEAR, ELDER_AGE, JOB_DEFS, MAP_H, MAP_W } from '../game/data';
+import { derived } from '../game/derived';
+import { landMax } from '../game/land';
 import { getMap, idx, inBounds, isWater, tx, ty } from '../game/map';
+import { PASTURE_HERD } from '../game/sim';
+import { findPath } from './paths';
 import { hash2 } from '../game/rng';
 import type { Building, GameState, JobId, Settler } from '../game/types';
 import { F, T } from '../game/types';
@@ -26,6 +30,10 @@ export interface Walker {
   alpha: number;
   leaving: boolean;
   seen: number;
+  /** Tiles still to walk through on the way to the target. */
+  path: number[];
+  /** Keeps people side by side on a road instead of in single file. */
+  lane: number;
 }
 
 export interface Animal {
@@ -131,24 +139,31 @@ export class Actors {
       case 'hunter': {
         const lodge = site(['lodge']);
         if (goHome) return lodge ? jitter(lodge.x, lodge.y + 0.6) : jitter(h.x, h.y + 1);
+        const herd = Math.random() < 0.6 ? this.workTile(state, lodge ?? h, 'life') : null;
+        if (herd !== null) {
+          const t = this.randomTileNear(state, tx(herd), ty(herd), 2, land);
+          if (t) return jitter(t[0], t[1]);
+        }
         return near(lodge, 6, (t) => t === T.Forest || t === T.Dense || t === T.Grass);
       }
       case 'woodcutter': {
         const camp = site(['lumber']);
         if (goHome) return camp ? jitter(camp.x, camp.y + 0.5) : jitter(h.x, h.y + 1);
-        return near(camp, 3, (t) => t === T.Forest || t === T.Dense);
+        // Walk out to the stand that is being felled.
+        const stand = this.workTile(state, camp ?? h, 'wood');
+        return stand !== null ? jitter(tx(stand), ty(stand), 0.3) : near(camp, 3, (t) => t === T.Forest || t === T.Dense);
       }
       case 'farmer': {
         const farm = site(['farm']) ?? h;
         return jitter(farm.x, farm.y + 0.2, 0.45);
       }
       case 'quarrier': {
-        const q = site(['quarry']) ?? h;
+        const q = this.pickWorking(state, 'quarry', w.id) ?? h;
         if (goHome) return jitter(q.x, q.y + 0.6);
         return near(q, 1, (t) => t === T.Hills || t === T.Mountain || land(t));
       }
       case 'miner': {
-        const m = site(['mine']) ?? h;
+        const m = this.pickWorking(state, 'mine', w.id) ?? h;
         if (goHome) {
           const s = site(['smithy', 'storehouse']) ?? h;
           return jitter(s.x, s.y + 0.6);
@@ -201,6 +216,38 @@ export class Actors {
     }
   }
 
+  /** A workplace of a type that still has something to dig. */
+  private pickWorking(state: GameState, type: string, seed: number): Building | null {
+    const list = state.buildings.filter((b) => b.done && b.type === type && !b.spent);
+    return list.length ? list[seed % list.length] : null;
+  }
+
+  /** The tile a workplace's workers are taking from: the stand being felled, or the largest herd. */
+  private workTile(state: GameState, b: Building, layer: 'wood' | 'life'): number | null {
+    const tiles = derived(state).catchments[layer].get(b.id);
+    if (!tiles?.length) return null;
+    const max = landMax(state.seed)[layer];
+    const stock = state.land[layer];
+    if (layer === 'wood') {
+      for (const i of tiles) if (stock[i] >= max[i] * 0.5) return i;
+      for (const i of tiles) if (stock[i] > 0) return i;
+      return null;
+    }
+    let best: number | null = null;
+    for (const i of tiles) if (state.explored[i] && stock[i] > 3 && (best === null || stock[i] > stock[best])) best = i;
+    return best;
+  }
+
+  /** Point a walker at a new destination, routed along roads and over bridges. */
+  private setTarget(state: GameState, w: Walker, x: number, y: number) {
+    w.tx = x;
+    w.ty = y;
+    const from = idx(Math.max(0, Math.min(MAP_W - 1, Math.floor(w.x))), Math.max(0, Math.min(MAP_H - 1, Math.floor(w.y))));
+    const to = idx(Math.max(0, Math.min(MAP_W - 1, Math.floor(x))), Math.max(0, Math.min(MAP_H - 1, Math.floor(y))));
+    const path = findPath(state, from, to);
+    w.path = path ? path.slice(0, -1) : [];
+  }
+
   private kindOf(state: GameState, s: Settler): Walker['kind'] {
     const age = (state.day - s.born) / DAYS_PER_YEAR;
     return age < ADULT_AGE ? 'child' : age >= ELDER_AGE ? 'elder' : 'adult';
@@ -234,6 +281,8 @@ export class Actors {
           alpha: 0,
           leaving: false,
           seen: stamp,
+          path: [],
+          lane: ((s.id * 0.37) % 1) * 0.5 - 0.25,
         };
         this.walkers.set(s.id, w);
       }
@@ -243,6 +292,10 @@ export class Actors {
         w.kind = kind;
         w.wait = 0;
         w.returning = false;
+        w.working = true;
+        w.path = [];
+        w.tx = w.x;
+        w.ty = w.y;
       }
     }
     for (const w of this.walkers.values()) if (w.seen !== stamp && !w.leaving) w.leaving = true;
@@ -251,20 +304,32 @@ export class Actors {
   syncAnimals(state: GameState) {
     const map = getMap(state.seed);
     const pastures = state.buildings.filter((b) => b.type === 'pasture' && b.done);
-    const key = `${state.stats.tilesExplored}:${pastures.length}`;
+    const max = landMax(state.seed).life;
+    // As many animals as the herds and shoals hold now; hunted-out herds show only a straggler or two.
+    const herd = (i: number) => (map.feature[i] === F.Game ? Math.ceil((4 * state.land.life[i]) / max[i]) : state.land.life[i] > max[i] * 0.3 ? 1 : 0);
+    const sheep = (b: Building) => Math.max(1, Math.min(4, Math.round(((b.stock ?? 4) / PASTURE_HERD) * 4)));
+    let key = `${state.stats.tilesExplored}:${pastures.map(sheep).join('')}:`;
+    for (const i of landMax(state.seed).lifeTiles) if (state.explored[i] && map.feature[i] !== F.Berries) key += herd(i);
     if (key === this.animalKey) return;
     this.animalKey = key;
-    this.animals = this.animals.filter((a) => a.kind === 'bird');
-    for (let i = 0; i < map.feature.length; i++) {
+    const keep = this.animals.filter((a) => a.kind === 'bird');
+    const old = this.animals;
+    this.animals = keep;
+    const reuse = (kind: Animal['kind'], hx: number, hy: number, r: number) => {
+      const k = old.findIndex((a) => a.kind === kind && Math.abs(a.hx - hx) < r && Math.abs(a.hy - hy) < r);
+      if (k < 0) return null;
+      return old.splice(k, 1)[0];
+    };
+    for (const i of landMax(state.seed).lifeTiles) {
       if (!state.explored[i]) continue;
       const f = map.feature[i];
-      if (f === F.Game) {
-        for (let k = 0; k < 3; k++) this.animals.push(this.spawn('deer', tx(i) + Math.random(), ty(i) + Math.random()));
-      } else if (f === F.Fish) {
-        this.animals.push(this.spawn('fish', tx(i) + 0.5, ty(i) + 0.5));
+      if (f !== F.Game && f !== F.Fish) continue;
+      for (let k = 0; k < herd(i); k++) {
+        const kind = f === F.Game ? 'deer' : 'fish';
+        this.animals.push(reuse(kind, tx(i) + 0.5, ty(i) + 0.5, 1.2) ?? this.spawn(kind, tx(i) + (f === F.Fish ? 0.5 : Math.random()), ty(i) + (f === F.Fish ? 0.5 : Math.random())));
       }
     }
-    for (const p of pastures) for (let k = 0; k < 3; k++) this.animals.push(this.spawn('sheep', p.x + 0.3 + Math.random() * 0.4, p.y + 0.6 + Math.random() * 0.3));
+    for (const p of pastures) for (let k = 0; k < sheep(p); k++) this.animals.push(reuse('sheep', p.x + 0.5, p.y + 0.75, 0.6) ?? this.spawn('sheep', p.x + 0.3 + Math.random() * 0.4, p.y + 0.6 + Math.random() * 0.3));
   }
 
   private spawn(kind: Animal['kind'], x: number, y: number): Animal {
@@ -275,6 +340,7 @@ export class Actors {
     const state = this.getState();
     const map = getMap(state.seed);
     const sp = Math.min(3, Math.max(1, gameSpeed));
+    const roadTiles = new Set(state.roads);
     for (const w of this.walkers.values()) {
       w.alpha = Math.min(1, Math.max(0, w.alpha + (w.leaving ? -dt * 1.5 : dt * 2)));
       if (w.leaving && w.alpha <= 0) {
@@ -283,14 +349,26 @@ export class Actors {
       }
       if (w.leaving) continue;
       w.phase += dt * sp;
-      const dx = w.tx - w.x;
-      const dy = w.ty - w.y;
-      const dist = Math.hypot(dx, dy);
       if (w.wait > 0) {
         w.wait -= dt * sp;
         continue;
       }
-      if (dist < 0.05) {
+      // Follow the route tile by tile, then make for the exact spot.
+      let gx = w.tx;
+      let gy = w.ty;
+      while (w.path.length) {
+        const p = w.path[0];
+        gx = tx(p) + 0.5 + w.lane;
+        gy = ty(p) + 0.6 + w.lane * 0.6;
+        if (Math.hypot(gx - w.x, gy - w.y) > 0.12) break;
+        w.path.shift();
+        gx = w.tx;
+        gy = w.ty;
+      }
+      const dx = gx - w.x;
+      const dy = gy - w.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < 0.05 && !w.path.length) {
         // Arrived: work or rest for a while, then pick the next destination.
         if (!w.working) {
           w.working = true;
@@ -301,13 +379,14 @@ export class Actors {
           w.working = false;
           if (w.kind === 'adult') w.returning = !w.returning;
           const [nx, ny] = this.nextTarget(state, w);
-          w.tx = nx;
-          w.ty = ny;
+          this.setTarget(state, w, nx, ny);
         }
         continue;
       }
       w.working = false;
-      const speed = w.speed * (w.kind === 'elder' ? 0.6 : w.kind === 'child' ? 1.1 : 1) * sp;
+      const here = idx(Math.max(0, Math.min(MAP_W - 1, Math.floor(w.x))), Math.max(0, Math.min(MAP_H - 1, Math.floor(w.y))));
+      const onRoad = roadTiles.has(here);
+      const speed = w.speed * (w.kind === 'elder' ? 0.6 : w.kind === 'child' ? 1.1 : 1) * (onRoad ? 1.25 : 1) * sp;
       const step = Math.min(dist, speed * dt);
       w.x += (dx / dist) * step;
       w.y += (dy / dist) * step;

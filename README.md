@@ -40,7 +40,19 @@ up. Tips can be switched off from the menu.
   morale; people die of old age, illness, hunger, cold, wolves or raids.
 - **Seasons.** Winter brings poor foraging, no harvest and a need for firewood.
 - **Interactive map.** Procedurally generated terrain (rivers, coasts, forests, hills, mountains) with fog of war.
-  Adjacency matters: lumber camps go by forests, farms by water and mines on ore veins.
+  Adjacency matters: lumber camps go by forests, farms by water and mines beside ore veins.
+- **A living land.** Every tile remembers what it still holds. Woodcutters fell the nearest stands, leaving stumps
+  that grow back as saplings over a few years, fastest where a lumber camp replants them (the Forestry policy
+  decides how hard the woods are worked). Hunted herds dwindle to a breeding core and recover when left alone,
+  while pastures breed their own herds. Berry thickets and fishing waters get picked and fished out. Quarries
+  and mines run out for good, so the council opens new ones further out. Click any tile to see what is left.
+- **Occupied land.** Nothing is built on water, mountains, standing trees, berry thickets, ore veins (except mines)
+  or roads. Forest has to be felled first.
+- **A settlement that grows like a real one.** Every building is joined to the hearth by a road, and buildings may
+  not wall off a lane or a pass. A village green surrounds the hearth with four ways out. Homes line the roads near
+  the centre, stores and halls sit at its heart, fields spread over the fertile land beyond, and camps, quarries
+  and mines go where the timber, stone and ore actually are. When good land lies across a river, the council
+  builds a **bridge**. Settlers walk the roads and cross rivers only by bridge.
 - **Exploration.** Ruins, supply caches, wanderer camps that join you, sacred groves, game herds and ore veins.
 - **Idle-friendly.** The game autosaves. Time away passes at half speed (up to 12 in-game years) with a summary of
   what happened, and the council keeps working the whole time. Saves can be exported and imported as text.
@@ -90,11 +102,12 @@ src/game/      pure simulation — no DOM
   guide.ts       the elder's tips that introduce each system
   council.ts     the automation that runs the settlement according to your decisions
   map.ts         seeded world generation
+  land.ts        what the land still holds, regrowth, roads, bridges and reach
   sim.ts         the daily tick: production, consumption, construction, exploration, births, deaths, morale
   events.ts      random events and player choices
   actions.ts     everything the player can do
   save.ts        save/load, export, offline progress
-src/render/    canvas renderer: sprites, seasonal terrain, camera/input, settlers & particles
+src/render/    canvas renderer: sprites, seasonal terrain, live forests, roads, camera/input, settlers & walking routes
 src/ui/        DOM interface: HUD, panels, inspector, goals, modals, tooltips, audio
 tests/         unit tests and a heuristic bot (autoplayer.ts) that plays whole games
 ```

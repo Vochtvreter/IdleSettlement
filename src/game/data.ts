@@ -137,7 +137,7 @@ export const JOB_DEFS: Record<JobId, JobDef> = {
   },
 };
 
-export type TerrainRule = 'land' | 'open' | 'quarry' | 'mine' | 'any-land-forest';
+export type TerrainRule = 'land' | 'open' | 'quarry' | 'mine' | 'forest-edge' | 'bridge';
 
 export interface BuildingDef {
   name: string;
@@ -159,9 +159,8 @@ export interface BuildingDef {
   hint?: string;
 }
 
-/** Terrain that any building may stand on. */
+/** Terrain that buildings may stand on. Forest only counts once its trees have been felled. */
 export const BUILDABLE: ReadonlySet<T> = new Set([T.Sand, T.Grass, T.Meadow, T.Forest, T.Dense, T.Hills]);
-export const OPEN_LAND: ReadonlySet<T> = new Set([T.Grass, T.Meadow, T.Sand]);
 
 export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
   campfire: {
@@ -189,22 +188,22 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
   },
   lumber: {
     name: 'Lumber Camp',
-    desc: 'A woodcutters’ camp. Each neighbouring forest tile adds +15% output.',
+    desc: 'A woodcutters’ camp. They fell the woods nearby and replant what they cut, so the forest grows back. Each neighbouring stand of trees adds +15% output.',
     cost: { wood: 20 },
     work: 12,
-    rule: 'any-land-forest',
+    rule: 'forest-edge',
     slots: { woodcutter: 3 },
     territory: 2,
     benefit: '+3 woodcutter slots',
-    hint: 'Place next to forests',
+    hint: 'Cleared land at a forest’s edge',
   },
   lodge: {
     name: 'Hunting Lodge',
-    desc: 'Trappers and hunters base here. Nearby forests and game herds boost the hunt.',
+    desc: 'Trappers and hunters base here. Nearby forests and game herds boost the hunt, but herds hunted too hard dwindle and take years to recover.',
     cost: { wood: 24 },
     work: 12,
     tech: 'hunting_traps',
-    rule: 'any-land-forest',
+    rule: 'land',
     slots: { hunter: 3 },
     territory: 2,
     benefit: '+3 hunter slots',
@@ -223,7 +222,7 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
   },
   quarry: {
     name: 'Quarry',
-    desc: 'Cut stone from the hillside. Each neighbouring hill or mountain adds +10%.',
+    desc: 'Cut stone from the hillside. Each neighbouring hill or mountain adds +10%. The rock runs out in time, and a worked-out quarry must be replaced.',
     cost: { wood: 28 },
     work: 15,
     tech: 'stone_tools',
@@ -235,7 +234,7 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
   },
   farm: {
     name: 'Farm',
-    desc: 'Tilled fields. +30% next to rivers or lakes, +10% on meadows.',
+    desc: 'Tilled fields. +30% next to rivers or lakes, +10% on meadows. Can be sown on felled forest.',
     cost: { wood: 30, stone: 10 },
     work: 18,
     tech: 'agriculture',
@@ -280,17 +279,17 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
   },
   pasture: {
     name: 'Pasture',
-    desc: 'Fenced grazing for tamed animals. Produces food and hides on its own.',
+    desc: 'Fenced grazing where tamed animals are bred. The herd grows over the seasons and gives food and hides without hunting the wild.',
     cost: { wood: 40, hides: 10 },
     work: 16,
     tech: 'husbandry',
     rule: 'open',
     territory: 2,
-    benefit: '+1.6 food, +0.15 hides /day',
+    benefit: 'Up to +1.8 food, +0.15 hides /day',
   },
   mine: {
     name: 'Mine',
-    desc: 'Shafts into the mountainside. Built on an ore vein, yields are doubled.',
+    desc: 'Shafts into the mountainside. Next to a rich ore vein, yields are doubled. Veins run dry, and so in time does the mountain.',
     cost: { wood: 50, stone: 40 },
     work: 25,
     tech: 'mining',
@@ -345,6 +344,16 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
     max: 3,
     benefit: '+8 morale',
   },
+  bridge: {
+    name: 'Bridge',
+    desc: 'Timber spans across a river, so your people can settle and work the far bank.',
+    cost: { wood: 24 },
+    work: 10,
+    rule: 'bridge',
+    territory: 2,
+    benefit: 'Opens the far bank',
+    hint: 'On a river, next to land you can reach',
+  },
   monument: {
     name: 'The Sunspire',
     desc: 'A towering beacon of stone and bronze, the legacy of your people for all ages. It consumes vast materials as it rises. Completing it wins the game.',
@@ -362,6 +371,7 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
 export const BUILD_ORDER: BuildingId[] = [
   'hut',
   'lumber',
+  'bridge',
   'lodge',
   'storehouse',
   'quarry',
