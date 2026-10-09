@@ -17,8 +17,10 @@ import {
   TWEAKS,
   tweak,
   type DecisionDef,
+  type TweakDef,
 } from '../game/decisions';
 import { canAfford } from '../game/derived';
+import { anyPolicyUnlocked, anyTweakUnlocked, focusRevealed, manualRevealed, revealSignature } from '../game/reveal';
 import type { GameState } from '../game/types';
 import { sfx } from './audio';
 import { costEl, h, tip } from './dom';
@@ -27,20 +29,14 @@ import type { Game } from './types';
 type Updater = () => void;
 
 /** True when a decision is waiting for the player (used for badges and the HUD pill). */
-export function pendingDecision(s: GameState): DecisionDef | null {
-  const p = nextPath(s);
-  if (!p) return null;
-  if (!pathRequirements(s, p).ready) return null;
-  if (p.tech && !techStatus(s, p.tech).ok) return null;
-  return p;
-}
+export { pendingDecision } from '../game/reveal';
 
 export function decideSignature(s: GameState) {
   const p = nextPath(s);
   const ready = p ? pathRequirements(s, p).ready : false;
   const afford = p?.tech ? techStatus(s, p.tech).ok : true;
   const cds = DECISIONS.filter((d) => d.kind === 'policy').map((d) => (policyCooldown(s, d.id) > 0 ? 1 : 0)).join('');
-  return `d:${JSON.stringify(s.decisions)}:${s.objective}:${p?.id}:${ready}:${afford}:${JSON.stringify(s.council)}:${cds}`;
+  return `d:${JSON.stringify(s.decisions)}:${s.objective}:${p?.id}:${ready}:${afford}:${JSON.stringify(s.council)}:${cds}:${revealSignature(s)}`;
 }
 
 function lockLine(i: number) {
@@ -73,12 +69,12 @@ export function buildDecide(game: Game, b: HTMLElement, updaters: Updater[]) {
     if (p.tech) {
       const reqs = h('div', { class: 'reqs' });
       const t = TECH_DEFS[p.tech];
-      if (t.minPop) reqs.append(h('div', { class: s.settlers.length >= t.minPop ? 'ok' : 'no' }, `${s.settlers.length >= t.minPop ? '✔' : '✘'} ${t.minPop} people (${s.settlers.length})`));
-      for (const r of t.requires ?? []) reqs.append(h('div', { class: s.techs.includes(r) ? 'ok' : 'no' }, `${s.techs.includes(r) ? '✔' : '✘'} ${TECH_DEFS[r].name}`));
-      reqs.append(h('div', { class: afford ? 'ok' : 'no', style: 'display:flex;gap:6px;align-items:center' }, afford ? '✔' : '✘', costEl(s, t.cost)));
+      if (t.minPop) reqs.append(h('div', { class: s.settlers.length >= t.minPop ? 'ok' : 'no' }, `${s.settlers.length >= t.minPop ? '✔' : '○'} ${t.minPop} people (${s.settlers.length})`));
+      for (const r of t.requires ?? []) reqs.append(h('div', { class: s.techs.includes(r) ? 'ok' : 'no' }, `${s.techs.includes(r) ? '✔' : '○'} ${TECH_DEFS[r].name}`));
+      reqs.append(h('div', { class: afford ? 'ok' : 'no', style: 'display:flex;gap:6px;align-items:center' }, afford ? '✔' : '○', costEl(s, t.cost)));
       card.append(reqs);
       if (req.ready && !afford) card.append(h('div', { class: 'note' }, 'The council is saving resources for this. The choice opens once they are gathered.'));
-      else if (!req.ready) card.append(h('div', { class: 'note' }, 'Not yet — the settlement keeps growing on its own meanwhile.'));
+      else if (!req.ready) card.append(h('div', { class: 'note' }, 'Not yet. The council works toward these on its own; the paths open once every item is ticked.'));
       else card.append(h('div', { class: 'note good' }, 'Your people are ready. Choose a path to enter the new age. This choice is permanent.'));
     } else {
       card.append(h('div', { class: 'note good' }, 'Choose any time. This choice is permanent.'));
@@ -109,18 +105,19 @@ export function buildDecide(game: Game, b: HTMLElement, updaters: Updater[]) {
   }
 
   // ------------------------------------------------ focus
+  // Sections appear one at a time as the settlement grows, so a new player is never faced with all of them at once.
+  if (!focusRevealed(s)) return;
   const focus = DECISION_BY_ID.focus;
-  b.append(h('div', { class: 'section-title' }, focus.name));
-  b.append(h('div', { class: 'hint-line' }, focus.prompt));
+  const focusBox = section(b, 'focus', focus.name, focus.prompt);
   const seg = h('div', { class: 'seg' });
   for (const o of focus.options) {
     const btn = tip(h('button', { class: 'seg-btn' + (focusOf(s) === o.id ? ' sel' : '') }, o.name), `<h4>${o.name}</h4>${o.desc}`);
     btn.addEventListener('click', () => act('focus', o.id));
     seg.append(btn);
   }
-  b.append(seg);
+  focusBox.append(seg);
   const plan = h('div', { class: 'hint-line', style: 'margin-top:6px' });
-  b.append(plan);
+  focusBox.append(plan);
   updaters.push(() => {
     const g = game.state;
     const w = g.council.build ? councilWish(g) : null;
@@ -133,62 +130,29 @@ export function buildDecide(game: Game, b: HTMLElement, updaters: Updater[]) {
   });
 
   // ------------------------------------------------ policies
-  b.append(h('div', { class: 'section-title' }, 'Policies'));
-  for (const d of DECISIONS.filter((x) => x.kind === 'policy')) {
-    const unlocked = decisionUnlocked(s, d);
-    const box = h('div', { class: 'policy' + (unlocked ? '' : ' locked') }, h('div', { class: 'pn' }, d.name), h('div', { class: 'pq' }, d.prompt));
-    if (!unlocked) {
-      box.append(lockLine(d.unlock));
-      b.append(box);
-      continue;
-    }
-    const cd = policyCooldown(s, d.id);
-    const cur = choiceOf(s, d.id);
-    const row = h('div', { class: 'seg' });
-    for (const o of d.options) {
-      const btn = tip(h('button', { class: 'seg-btn' + (cur === o.id ? ' sel' : ''), disabled: cd > 0 && cur !== o.id }, o.name), `<h4>${o.name}</h4>${o.desc}`);
-      btn.addEventListener('click', () => act(d.id, o.id));
-      row.append(btn);
-    }
-    box.append(row);
-    const cur0 = d.options.find((o) => o.id === cur);
-    const note = h('div', { class: 'pe' }, cur0?.desc ?? '');
-    box.append(note);
-    if (cd > 0) {
-      const cdEl = h('div', { class: 'cd' });
-      box.append(cdEl);
-      updaters.push(() => (cdEl.textContent = `Settled for now — can change again in ${policyCooldown(game.state, d.id)} days.`));
-    }
-    b.append(box);
+  const policies = DECISIONS.filter((x) => x.kind === 'policy');
+  if (anyPolicyUnlocked(s)) {
+    const box = section(b, 'policies', 'Policies', 'Trade-offs: each one gives something and costs something. A policy can be changed once per season.');
+    for (const d of policies) if (decisionUnlocked(s, d)) box.append(policyBox(game, d, act, updaters));
   }
 
   // ------------------------------------------------ tweaks
-  b.append(h('div', { class: 'section-title' }, 'Council settings'));
-  for (const t of TWEAKS) {
-    const unlocked = milestoneDone(s, t.unlock);
-    const val = h('span', { class: 'tv' });
-    const box = h('div', { class: 'policy' + (unlocked ? '' : ' locked') }, h('div', { class: 'pn', style: 'display:flex;justify-content:space-between' }, t.name, val), h('div', { class: 'pq' }, t.desc));
-    if (!unlocked) {
-      val.textContent = `${t.initial}${t.unit}`;
-      box.append(lockLine(t.unlock));
-    } else {
-      const input = h('input', { type: 'range', min: t.min, max: t.max, step: t.step, class: 'slider' }) as HTMLInputElement;
-      input.value = String(tweak(s, t.id));
-      const show = () => (val.textContent = `${tweak(game.state, t.id)}${t.unit}`);
-      input.addEventListener('input', () => {
-        setTweak(game.state, t.id, Number(input.value));
-        show();
-      });
-      input.addEventListener('change', () => game.changed());
-      show();
-      box.append(input);
-    }
-    b.append(box);
+  if (anyTweakUnlocked(s)) {
+    const box = section(b, 'tweaks', 'Council settings', 'Fine-tune how the council runs things.');
+    for (const t of TWEAKS) if (milestoneDone(s, t.unlock)) box.append(tweakBox(game, t));
   }
 
+  // ------------------------------------------------ what unlocks next
+  // A single teaser instead of a wall of locked boxes.
+  const nextPolicy = policies.find((d) => !decisionUnlocked(s, d));
+  const nextTweak = TWEAKS.find((t) => !milestoneDone(s, t.unlock));
+  const soonest = Math.min(nextPolicy?.unlock ?? Infinity, nextTweak?.unlock ?? Infinity);
+  if (nextPolicy?.unlock === soonest) b.append(teaser(`${nextPolicy.name} policy`, nextPolicy.prompt, soonest));
+  if (nextTweak?.unlock === soonest) b.append(teaser(`${nextTweak.name} setting`, nextTweak.desc, soonest));
+
   // ------------------------------------------------ council toggles
-  b.append(h('div', { class: 'section-title' }, 'Who decides the details?'));
-  b.append(h('div', { class: 'hint-line' }, 'The council handles the day-to-day. Take any of it over yourself if you prefer.'));
+  if (!manualRevealed(s)) return;
+  const manual = section(b, 'manual', 'Who decides the details?', 'The council handles the day-to-day. Take any of it over yourself if you prefer.');
   const toggles: [keyof GameState['council'], string, string][] = [
     ['jobs', 'Work assignments', 'People tab'],
     ['build', 'Construction', 'Build tab'],
@@ -202,6 +166,54 @@ export function buildDecide(game: Game, b: HTMLElement, updaters: Updater[]) {
       sfx('click');
       game.changed();
     });
-    b.append(h('div', { class: 'toggle-row' }, h('div', null, h('div', null, label), h('div', { class: 'pq' }, on ? 'Managed by the council' : `You manage this in the ${where}`)), btn));
+    manual.append(h('div', { class: 'toggle-row' }, h('div', null, h('div', null, label), h('div', { class: 'pq' }, on ? 'Managed by the council' : `You manage this in the ${where}`)), btn));
   }
+}
+
+/** A titled section the guide can point at. */
+function section(parent: HTMLElement, id: string, title: string, hint: string) {
+  const box = h('div', { 'data-guide': id }, h('div', { class: 'section-title' }, title), h('div', { class: 'hint-line' }, hint));
+  parent.append(box);
+  return box;
+}
+
+function teaser(name: string, desc: string, unlock: number) {
+  return h('div', { class: 'policy locked' }, h('div', { class: 'pn' }, `Next: ${name}`), h('div', { class: 'pq' }, desc), lockLine(unlock));
+}
+
+function policyBox(game: Game, d: DecisionDef, act: (id: string, opt: string) => void, updaters: Updater[]) {
+  const s = game.state;
+  const box = h('div', { class: 'policy' }, h('div', { class: 'pn' }, d.name), h('div', { class: 'pq' }, d.prompt));
+  const cd = policyCooldown(s, d.id);
+  const cur = choiceOf(s, d.id);
+  const row = h('div', { class: 'seg' });
+  for (const o of d.options) {
+    const btn = tip(h('button', { class: 'seg-btn' + (cur === o.id ? ' sel' : ''), disabled: cd > 0 && cur !== o.id }, o.name), `<h4>${o.name}</h4>${o.desc}`);
+    btn.addEventListener('click', () => act(d.id, o.id));
+    row.append(btn);
+  }
+  box.append(row);
+  box.append(h('div', { class: 'pe' }, d.options.find((o) => o.id === cur)?.desc ?? ''));
+  if (cd > 0) {
+    const cdEl = h('div', { class: 'cd' });
+    box.append(cdEl);
+    updaters.push(() => (cdEl.textContent = `Settled for now — can change again in ${policyCooldown(game.state, d.id)} days.`));
+  }
+  return box;
+}
+
+function tweakBox(game: Game, t: TweakDef) {
+  const val = h('span', { class: 'tv' });
+  const box = h('div', { class: 'policy' }, h('div', { class: 'pn', style: 'display:flex;justify-content:space-between' }, t.name, val), h('div', { class: 'pq' }, t.desc));
+  const input = h('input', { type: 'range', min: t.min, max: t.max, step: t.step, class: 'slider' }) as HTMLInputElement;
+  input.value = String(tweak(game.state, t.id));
+  const show = () => (val.textContent = `${tweak(game.state, t.id)}${t.unit}`);
+  input.addEventListener('input', () => {
+    setTweak(game.state, t.id, Number(input.value));
+    show();
+  });
+  input.addEventListener('change', () => game.changed());
+  show();
+  box.append(input);
+  return box;
 }

@@ -856,6 +856,88 @@ button {
   color: #ffc4c4;
 }
 
+/* ------------------------------------------------------------------ guide */
+#guide {
+  position: absolute;
+  top: calc(var(--hud-h) + 160px);
+  left: 10px;
+  width: 300px;
+  padding: 10px 12px;
+  z-index: 22;
+  border-color: var(--gold);
+}
+#guide.in {
+  animation: rise 0.35s ease-out;
+}
+#guide .gk {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 1px;
+  color: var(--ember);
+  text-transform: uppercase;
+}
+#guide .gt {
+  font-size: 17px;
+  color: var(--gold);
+  margin: 2px 0 4px;
+}
+#guide .gb {
+  font-size: 13px;
+  line-height: 1.4;
+  color: #ddd3e8;
+}
+#guide .gb b {
+  font-weight: normal;
+  color: var(--gold);
+}
+#guide .ga {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+#guide .ga .link-btn {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--dim);
+}
+#guide .ga .link-btn:hover {
+  color: var(--muted);
+}
+/* What the current tip is about. */
+.guide-glow {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+  border-radius: 4px;
+  animation: guidePulse 1.4s ease-in-out infinite;
+}
+#tab-body .guide-glow,
+.tab.guide-glow {
+  outline-offset: -2px;
+}
+@keyframes guidePulse {
+  50% {
+    outline-color: rgba(255, 210, 94, 0.3);
+    box-shadow: 0 0 18px rgba(255, 210, 94, 0.35);
+  }
+}
+/* A tab that has just opened up, until it is visited. */
+.tab.fresh {
+  color: var(--gold);
+}
+.tab.fresh::after {
+  content: 'NEW';
+  position: absolute;
+  top: 3px;
+  left: 8%;
+  font-family: var(--mono);
+  font-size: 7px;
+  color: #1b1525;
+  background: var(--gold);
+  border-radius: 2px;
+  padding: 1px 2px;
+}
+
 /* ------------------------------------------------------------------ inspector */
 #inspector {
   position: absolute;
@@ -1427,6 +1509,14 @@ button {
     width: auto;
     right: 10px;
   }
+  #guide {
+    width: auto;
+    right: 10px;
+    padding: 8px 10px;
+  }
+  #guide .gb {
+    font-size: 12px;
+  }
   #zoom-ctl {
     right: 10px !important;
     bottom: calc(46vh + 10px);
@@ -1503,7 +1593,7 @@ button {
   color: var(--good);
 }
 .path-card .reqs .no {
-  color: var(--bad);
+  color: var(--muted);
 }
 .path-card .note {
   font-size: 12px;

@@ -269,7 +269,8 @@ class GameApp implements Game {
       if (saved) clearSave();
       const first = !saved;
       this.newGame({ legacy: saved?.victory ? saved.legacy + 1 : saved?.legacy ?? 0 });
-      if (first) this.ui.howToModal();
+      // The elder's tips introduce the game step by step; without them, show the full guide.
+      if (first && !this.ui.guide.enabled) this.ui.howToModal();
     });
     btns.append(
       newBtn,
