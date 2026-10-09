@@ -13,8 +13,7 @@ import {
   layerSum,
   networkMask,
   passableMask,
-  ringCorner,
-  ringOf,
+  ringOffsets,
   sizeOf,
   takenMask,
   terrainAt,
@@ -110,6 +109,8 @@ export interface Derived {
   siteMask: Uint8Array;
   /** Id of the building on each tile (0 for none). */
   buildingAt: Int32Array;
+  /** Tiles covered by buildings other than bridges and hearths: roads go round them. */
+  taken: Uint8Array;
   /** Network tiles: roads, trails, the greens and bridges. */
   network: Uint8Array;
   /** Trails blazed by pioneers. */
@@ -133,7 +134,14 @@ export interface Census {
   away: number;
 }
 
-const censusMemo = new WeakMap<GameState, { key: string; c: Census }>();
+interface CensusMemo {
+  day: number;
+  people: number;
+  bump: number;
+  towns: number;
+  c: Census;
+}
+const censusMemo = new WeakMap<GameState, CensusMemo>();
 const censusBump = new WeakMap<GameState, number>();
 
 /** Call after moving people between settlements. */
@@ -143,9 +151,9 @@ export function recount(state: GameState) {
 
 /** Who lives where. */
 export function census(state: GameState): Census {
-  const key = `${state.day}:${state.settlers.length}:${censusBump.get(state) ?? 0}:${state.towns.length}`;
+  const bump = censusBump.get(state) ?? 0;
   const m = censusMemo.get(state);
-  if (m && m.key === key) return m.c;
+  if (m && m.day === state.day && m.people === state.settlers.length && m.bump === bump && m.towns === state.towns.length) return m.c;
   const c: Census = { residents: new Map(), adults: new Map(), away: 0 };
   for (const t of state.towns) {
     c.residents.set(t.id, 0);
@@ -160,13 +168,11 @@ export function census(state: GameState): Census {
     const age = (state.day - s.born) / DAYS_PER_YEAR;
     if (age >= ADULT_AGE && age < ELDER_AGE) c.adults.set(s.town, (c.adults.get(s.town) ?? 0) + 1);
   }
-  censusMemo.set(state, { key, c });
+  censusMemo.set(state, { day: state.day, people: state.settlers.length, bump, towns: state.towns.length, c });
   return c;
 }
 
 // ------------------------------------------------------------------ memo
-
-const memo = new WeakMap<GameState, { key: string; base: Derived; d: Derived }>();
 
 function structureKey(state: GameState) {
   let done = 0;
@@ -174,39 +180,121 @@ function structureKey(state: GameState) {
   return `${state.buildings.length}:${done}:${state.nextBuildingId}:${state.roads.length}:${state.trails.length}:${state.graded.length}:${state.towns.length}`;
 }
 
-function keyOf(state: GameState) {
-  return `${structureKey(state)}:${state.techs.length}:${state.claimed.length}:${state.landEpoch}:${state.routes.length}:${state.towns.map((t) => t.tier).join('')}:${Object.values(state.decisions).join()}`;
+/**
+ * What `derived` was worked out from, in three layers: the buildings, ways, techs and settlements; the
+ * land's stocks (only whether pits are worked out, and the land around workplaces, depend on them);
+ * and the colonies' headcounts, which staff their workplaces.
+ */
+interface Memo {
+  buildings: Building[];
+  nb: number;
+  nextB: number;
+  roads: number;
+  trails: number;
+  graded: number;
+  towns: number;
+  tiers: number;
+  techs: number;
+  routes: number;
+  base: Derived;
+  landEpoch: number;
+  land: Derived | null;
+  /** Adults in each settlement after the capital, as staffed for `d`. */
+  staffed: number[];
+  d: Derived | null;
+}
+
+const memo = new WeakMap<GameState, Memo>();
+
+function tierSum(state: GameState) {
+  let t = 0;
+  for (const town of state.towns) t += town.tier;
+  return t;
+}
+
+/**
+ * Whether the memo still matches the buildings, ways, techs and settlements. Buildings finishing and
+ * decisions changing always go through `invalidate`, so they are not compared here.
+ */
+function sameBase(m: Memo, state: GameState) {
+  return (
+    m.buildings === state.buildings &&
+    m.nb === state.buildings.length &&
+    m.nextB === state.nextBuildingId &&
+    m.roads === state.roads.length &&
+    m.trails === state.trails.length &&
+    m.graded === state.graded.length &&
+    m.towns === state.towns.length &&
+    m.techs === state.techs.length &&
+    m.routes === state.routes.length &&
+    m.tiers === tierSum(state)
+  );
 }
 
 /** Colonies staff their workplaces with their own people, so their headcount matters to the job slots. */
-function staffKey(state: GameState) {
-  let colonies = '';
-  if (state.towns.length > 1) {
-    const c = census(state);
-    for (let k = 1; k < state.towns.length; k++) colonies += `${c.adults.get(state.towns[k].id) ?? 0};`;
-  }
-  return colonies;
+function sameStaff(m: Memo, state: GameState) {
+  if (state.towns.length < 2) return m.staffed.length === 0;
+  if (m.staffed.length !== state.towns.length - 1) return false;
+  const c = census(state);
+  for (let k = 1; k < state.towns.length; k++) if (m.staffed[k - 1] !== (c.adults.get(state.towns[k].id) ?? 0)) return false;
+  return true;
 }
 
-const baseMemo = new WeakMap<GameState, { key: string; d: Derived }>();
+function staffedNow(state: GameState): number[] {
+  if (state.towns.length < 2) return [];
+  const c = census(state);
+  return state.towns.slice(1).map((t) => c.adults.get(t.id) ?? 0);
+}
 
-/** Values that only change when buildings, techs, discoveries or the settlements change. Memoised per state. */
+/** Values that only change when buildings, techs, discoveries, the land or the settlements change. Memoised per state. */
 export function derived(state: GameState): Derived {
-  const key = keyOf(state);
-  let b = baseMemo.get(state);
-  if (!b || b.key !== key) baseMemo.set(state, (b = { key, d: compute(state) }));
-  const sk = staffKey(state);
-  const m = memo.get(state);
-  if (m && m.key === sk && m.base === b.d) return m.d;
-  const d = staff(state, b.d);
-  memo.set(state, { key: sk, base: b.d, d });
-  return d;
+  let m = memo.get(state);
+  if (!m || !sameBase(m, state)) {
+    m = {
+      buildings: state.buildings,
+      nb: state.buildings.length,
+      nextB: state.nextBuildingId,
+      roads: state.roads.length,
+      trails: state.trails.length,
+      graded: state.graded.length,
+      towns: state.towns.length,
+      tiers: tierSum(state),
+      techs: state.techs.length,
+      routes: state.routes.length,
+      base: compute(state),
+      landEpoch: NaN,
+      land: null,
+      staffed: [],
+      d: null,
+    };
+    memo.set(state, m);
+  }
+  if (!m.land || m.landEpoch !== state.landEpoch) {
+    m.land = withLand(state, m.base);
+    m.landEpoch = state.landEpoch;
+    m.d = null;
+  }
+  if (!m.d || !sameStaff(m, state)) {
+    m.staffed = staffedNow(state);
+    m.d = staff(state, m.land);
+  }
+  return m.d;
 }
 
 /** Forget what was worked out (the flood fills, keyed by exactly what they depend on, are kept). */
 export function invalidate(state: GameState) {
   memo.delete(state);
-  baseMemo.delete(state);
+}
+
+/** Quarries and mines with nothing left to dig. */
+function withLand(state: GameState, base: Derived): Derived {
+  const spent = new Set<number>();
+  for (const b of state.buildings) {
+    if (!b.done) continue;
+    if (b.type === 'quarry' && layerSum(state, 'stone', base.catchments.stone.get(b.id) ?? []) < 0.5) spent.add(b.id);
+    else if (b.type === 'mine' && layerSum(state, 'ore', base.catchments.ore.get(b.id) ?? []) < 0.5) spent.add(b.id);
+  }
+  return { ...base, spent };
 }
 
 export function jobUnlocked(state: GameState, j: JobId) {
@@ -266,21 +354,20 @@ function structure(state: GameState): Structure {
 function components(mask: Uint8Array, tiles: number[]): Int32Array {
   const comp = new Int32Array(mask.length).fill(-1);
   let id = 0;
+  const q: number[] = [];
   for (const i0 of tiles) {
     if (!mask[i0] || comp[i0] >= 0) continue;
-    const q = [i0];
+    q.length = 0;
+    q.push(i0);
     comp[i0] = id;
     for (let k = 0; k < q.length; k++) {
       const i = q[k];
-      const x = tx(i);
-      const y = ty(i);
-      for (const [dx, dy] of N4) {
-        if (!inBounds(x + dx, y + dy)) continue;
-        const j = idx(x + dx, y + dy);
-        if (!mask[j] || comp[j] >= 0) continue;
-        comp[j] = id;
-        q.push(j);
-      }
+      const x = i % MAP_W;
+      // East, west, south, north.
+      if (x + 1 < MAP_W && mask[i + 1] && comp[i + 1] < 0) (comp[i + 1] = id), q.push(i + 1);
+      if (x > 0 && mask[i - 1] && comp[i - 1] < 0) (comp[i - 1] = id), q.push(i - 1);
+      if (i + MAP_W < mask.length && mask[i + MAP_W] && comp[i + MAP_W] < 0) (comp[i + MAP_W] = id), q.push(i + MAP_W);
+      if (i >= MAP_W && mask[i - MAP_W] && comp[i - MAP_W] < 0) (comp[i - MAP_W] = id), q.push(i - MAP_W);
     }
     id++;
   }
@@ -406,9 +493,11 @@ function compute(state: GameState): Derived {
   const occupied = new Uint8Array(n);
   const siteMask = new Uint8Array(n);
   const buildingAt = new Int32Array(n);
+  const taken = new Uint8Array(n);
   const replant = new Uint8Array(n);
   let terrTiles: number[] = [];
   const catchments = { wood: new Map(), stone: new Map(), ore: new Map(), life: new Map() } as Derived['catchments'];
+  // Filled in with what the land still holds (see `withLand`).
   const spent = new Set<number>();
   const map = getMap(state.seed);
   const st = structure(state);
@@ -424,9 +513,11 @@ function compute(state: GameState): Derived {
 
   for (const b of state.buildings) {
     const tiles = tilesOf(b);
+    const covers = b.type !== 'bridge' && b.type !== 'campfire';
     for (const at of tiles) {
       occupied[at] = 1;
       buildingAt[at] = b.id;
+      if (covers) taken[at] = 1;
       if (!b.done) siteMask[at] = 1;
     }
     if (!b.done) {
@@ -446,7 +537,6 @@ function compute(state: GameState): Derived {
     }
 
     if (b.type === 'lumber') for (const i of catchments.wood.get(b.id) ?? []) replant[i] = 1;
-    if ((b.type === 'quarry' && layerSum(state, 'stone', catchments.stone.get(b.id) ?? []) < 0.5) || (b.type === 'mine' && layerSum(state, 'ore', catchments.ore.get(b.id) ?? []) < 0.5)) spent.add(b.id);
     const r = b.type === 'campfire' ? hearthRadius(state, b.town) : def.territory;
     const [w, h] = sizeOf(b.type);
     for (const [dx, dy] of territoryShape(w, h, r)) {
@@ -541,6 +631,7 @@ function compute(state: GameState): Derived {
     occupied,
     siteMask,
     buildingAt,
+    taken,
     network: st.network,
     trail,
     roadable: st.roadable,
@@ -559,17 +650,18 @@ function roadableFrom(state: GameState, netTiles: number[]): Uint8Array {
   const out = new Uint8Array(n);
   const queue: number[] = [];
   for (const i of netTiles) if (!taken[i]) (out[i] = 1), queue.push(i);
+  const visit = (j: number) => {
+    if (out[j] || taken[j] || !area[j] || blocked(map, j) || map.feature[j] === F.Ruins || map.feature[j] === F.Grove) return;
+    out[j] = 1;
+    queue.push(j);
+  };
   for (let q = 0; q < queue.length; q++) {
     const i = queue[q];
-    const x = tx(i);
-    const y = ty(i);
-    for (const [dx, dy] of N4) {
-      if (!inBounds(x + dx, y + dy)) continue;
-      const j = idx(x + dx, y + dy);
-      if (out[j] || taken[j] || !area[j] || blocked(map, j) || map.feature[j] === F.Ruins || map.feature[j] === F.Grove) continue;
-      out[j] = 1;
-      queue.push(j);
-    }
+    const x = i % MAP_W;
+    if (x + 1 < MAP_W) visit(i + 1);
+    if (x > 0) visit(i - 1);
+    if (i + MAP_W < n) visit(i + MAP_W);
+    if (i >= MAP_W) visit(i - MAP_W);
   }
   return out;
 }
@@ -578,8 +670,11 @@ function roadableFrom(state: GameState, netTiles: number[]): Uint8Array {
 function countRing(state: GameState, type: BuildingId, x: number, y: number, pred: (t: number, f: number, i: number) => boolean) {
   const map = getMap(state.seed);
   const [w, h] = sizeOf(type);
+  const r = ringOffsets(w, h);
   let n = 0;
-  for (const [xx, yy] of ringOf(x, y, w, h)) {
+  for (let k = 0; k < r.dx.length; k++) {
+    const xx = x + r.dx[k];
+    const yy = y + r.dy[k];
     if (!inBounds(xx, yy)) continue;
     const i = idx(xx, yy);
     if (pred(map.terrain[i], map.feature[i], i)) n++;
@@ -691,8 +786,11 @@ export function canPlace(state: GameState, type: BuildingId, tile: number, d: De
   }
   // A mountainside site must lean on ground people can reach.
   let access = false;
-  for (const [xx, yy] of ringOf(x, y, w, h)) {
-    if (!inBounds(xx, yy) || ringCorner(x, y, w, h, xx, yy)) continue;
+  const ring = ringOffsets(w, h);
+  for (let k = 0; k < ring.dx.length; k++) {
+    const xx = x + ring.dx[k];
+    const yy = y + ring.dy[k];
+    if (!inBounds(xx, yy) || ring.corner[k]) continue;
     const j = idx(xx, yy);
     if (d.roadable[j] && !(d.occupied[j] && !d.network[j])) access = true;
     if (rock && d.reach[j]) reached = true;
@@ -736,19 +834,27 @@ function BUILDABLE_LAND(t: number) {
  * Whether a building here would split the open ground around it in two, closing off a lane or a pass.
  * Walks the ring of tiles around the footprint: the open stretches that touch its sides must all be one.
  */
+const ringOpen = new Uint8Array(64);
+
 function cutsThrough(state: GameState, d: Derived, x: number, y: number, w: number, h: number) {
   const map = getMap(state.seed);
-  const ring = ringOf(x, y, w, h);
-  const open = ring.map(([xx, yy]) => {
-    if (!inBounds(xx, yy)) return false;
-    const j = idx(xx, yy);
-    return !blocked(map, j) && !(d.occupied[j] && !d.network[j]);
-  });
-  if (open.every(Boolean)) return false;
-  const side = ring.map(([xx, yy]) => !ringCorner(x, y, w, h, xx, yy));
+  const ring = ringOffsets(w, h);
+  const L = ring.dx.length;
+  const open = ringOpen;
+  let startK = -1;
+  for (let k = 0; k < L; k++) {
+    const xx = x + ring.dx[k];
+    const yy = y + ring.dy[k];
+    let o = 0;
+    if (inBounds(xx, yy)) {
+      const j = idx(xx, yy);
+      o = !blocked(map, j) && !(d.occupied[j] && !d.network[j]) ? 1 : 0;
+    }
+    open[k] = o;
+    if (!o && startK < 0) startK = k;
+  }
+  if (startK < 0) return false;
   // Count circular runs of open cells that include at least one side cell.
-  const L = ring.length;
-  const startK = open.findIndex((o) => !o);
   let runs = 0;
   let inRun = false;
   let hasSide = false;
@@ -756,7 +862,7 @@ function cutsThrough(state: GameState, d: Derived, x: number, y: number, w: numb
     const k = (startK + s) % L;
     if (open[k]) {
       if (!inRun) (inRun = true), (hasSide = false);
-      if (side[k]) hasSide = true;
+      if (!ring.corner[k]) hasSide = true;
     } else if (inRun) {
       inRun = false;
       if (hasSide) runs++;

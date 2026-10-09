@@ -345,31 +345,58 @@ export function choiceOf(state: GameState, id: string): string | undefined {
   return state.decisions[id] ?? DECISION_BY_ID[id]?.initial;
 }
 
-function activeOptions(state: GameState): DecisionOption[] {
-  const out: DecisionOption[] = [];
+interface ActiveMemo {
+  /** The choice behind each decision, in DECISIONS order. */
+  chosen: (string | undefined)[];
+  options: DecisionOption[];
+  mul: Map<string, number>;
+  add: Map<string, number>;
+}
+
+const activeMemo = new WeakMap<GameState, ActiveMemo>();
+
+/** The options chosen for every decision but the focus, with their effects summed up as they are asked for. */
+function active(state: GameState): ActiveMemo {
+  const m = activeMemo.get(state);
+  if (m) {
+    let same = true;
+    for (let k = 0; k < DECISIONS.length && same; k++) same = m.chosen[k] === state.decisions[DECISIONS[k].id];
+    if (same) return m;
+  }
+  const options: DecisionOption[] = [];
   for (const d of DECISIONS) {
     if (d.kind === 'focus') continue;
     const c = state.decisions[d.id];
     if (!c) continue;
     const o = d.options.find((x) => x.id === c);
-    if (o) out.push(o);
+    if (o) options.push(o);
   }
-  return out;
+  const memo: ActiveMemo = { chosen: DECISIONS.map((d) => state.decisions[d.id]), options, mul: new Map(), add: new Map() };
+  activeMemo.set(state, memo);
+  return memo;
 }
 
 /** Multiplicative effect of all active decisions for a key (1 if none). Job keys include the 'labour' effect. */
 export function fxMul(state: GameState, key: string): number {
-  let m = 1;
-  for (const o of activeOptions(state)) {
+  const a = active(state);
+  let m = a.mul.get(key);
+  if (m !== undefined) return m;
+  m = 1;
+  for (const o of a.options) {
     if (o.fx[key] !== undefined) m *= o.fx[key];
     if (LABOUR.has(key) && o.fx.labour !== undefined) m *= o.fx.labour;
   }
+  a.mul.set(key, m);
   return m;
 }
 
 export function fxAdd(state: GameState, key: string): number {
-  let a = 0;
-  for (const o of activeOptions(state)) a += o.fx[key] ?? 0;
+  const memo = active(state);
+  let a = memo.add.get(key);
+  if (a !== undefined) return a;
+  a = 0;
+  for (const o of memo.options) a += o.fx[key] ?? 0;
+  memo.add.set(key, a);
   return a;
 }
 

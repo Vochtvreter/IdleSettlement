@@ -6,7 +6,7 @@ import {
   JOB_DEFS,
   PARTY_SIZE,
 } from './data';
-import { census, derived, invalidate, jobUnlocked } from './derived';
+import { census, derived, invalidate, jobUnlocked, type SlotGroup } from './derived';
 import { worksQueue } from './actions';
 import { centerOf, drawFrom, fellLeft, growLand, landFrac, landMax, prepareSite } from './land';
 import { inParty, loseTraveller, paveRoutes, realmDay, setRevealHook, townWithRoom, tradeKnowledge, tradeMorale } from './realm';
@@ -140,21 +140,40 @@ export function buildMaterials(state: GameState, type: BuildingId): Partial<Reco
   return Object.fromEntries(Object.entries(m).map(([k, v]) => [k, Math.round((v ?? 0) * f)]));
 }
 
+/** Running totals over a job's slot groups: workers, and their summed multipliers, before each group. */
+const slotTotals = new WeakMap<SlotGroup[], { count: Float64Array; sum: Float64Array }>();
+
+function totalsOf(groups: SlotGroup[]) {
+  let t = slotTotals.get(groups);
+  if (t) return t;
+  const count = new Float64Array(groups.length + 1);
+  const sum = new Float64Array(groups.length + 1);
+  for (let k = 0; k < groups.length; k++) {
+    count[k + 1] = count[k] + groups[k].count;
+    sum[k + 1] = sum[k] + groups[k].count * groups[k].mult;
+  }
+  slotTotals.set(groups, (t = { count, sum }));
+  return t;
+}
+
 /** Average building multiplier for the first n workers of a job (best buildings fill first). */
 export function slotMult(state: GameState, j: JobId, n: number): number {
   if (n <= 0) return 1;
   const groups = derived(state).slotGroups[j];
   if (!groups.length) return 1;
-  let left = n;
-  let sum = 0;
-  for (const g of groups) {
-    const take = Math.min(left, g.count);
-    sum += take * g.mult;
-    left -= take;
-    if (!left) break;
+  const { count, sum } = totalsOf(groups);
+  // The last group that fills completely.
+  let lo = 0;
+  let hi = groups.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (count[mid] <= n) lo = mid;
+    else hi = mid - 1;
   }
-  sum += left; // overflow (should not happen with slot caps)
-  return sum / n;
+  const left = n - count[lo];
+  // Overflow past every slot (should not happen with slot caps) counts as plain work.
+  const total = lo < groups.length ? sum[lo] + left * groups[lo].mult : sum[lo] + left;
+  return total / n;
 }
 
 /**

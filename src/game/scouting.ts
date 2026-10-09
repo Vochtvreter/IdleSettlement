@@ -16,6 +16,7 @@ import { Heap, layTrail, townById } from './land';
 import { getMap, idx, inBounds, N4, tx, ty } from './map';
 import { chart, inParty, lightHearth, siteCalling, siteFree, siteProfile, siteValues, townCap } from './realm';
 import { hash2, type Rng } from './rng';
+import { withSearch } from './scratch';
 import { hasTech, isAdult, seasonIndex } from './state';
 import type { Expedition, FxEvent, GameState, Settler } from './types';
 import { Biome, T } from './types';
@@ -104,71 +105,74 @@ export function planTrip(state: GameState, town: number): TripPlan | null {
   if (!home) return null;
   const map = getMap(state.seed);
   const net = derived(state).network;
-  const n = MAP_W * MAP_H;
   // Unknown land well within sight of each step (a square inside their circle of sight).
   const rb = sightOf(state) - 1;
   // Out and back, with a night in camp for every few days on the move, and something to spare.
   const budget = provisions(state) * speedOf(state) * 0.28;
   const R = Math.ceil(budget / 0.2) + rb + 2;
   const unknown = unknownCounter(state, home.x - R, home.y - R, home.x + R + 1, home.y + R + 1);
-  const dist = new Float32Array(n).fill(Infinity);
-  const prev = new Int32Array(n).fill(-1);
-  const gain = new Float32Array(n);
-  const closed = new Uint8Array(n);
-  const heap = new Heap();
-  const start = idx(home.x, home.y);
-  dist[start] = 0;
-  heap.push(start, 0);
   const others = state.expeditions.filter((e) => e.kind === 'scout' && e.turn !== undefined).map((e) => e.path[e.turn!]);
   const mark = state.exploreTarget;
-  let best = -1;
-  let bestScore = -Infinity;
-  while (heap.size) {
-    const i = heap.pop();
-    if (closed[i]) continue;
-    closed[i] = 1;
-    if (dist[i] > budget) break;
-    if (i !== start) {
-      let sc: number;
-      if (mark !== null) sc = -Math.hypot(tx(i) - tx(mark), ty(i) - ty(mark)) * 3 + gain[i] * 0.1;
-      else {
-        sc = gain[i] + hash2(tx(i), ty(i), state.day) * 3;
-        for (const o of others) {
-          const dd = Math.hypot(tx(o) - tx(i), ty(o) - ty(i));
-          if (dd < 12) sc -= (12 - dd) * 2;
+  const plan = withSearch((search): TripPlan | null | 'unreachable' => {
+    const { dist, prev, extra: gain, flag: closed } = search;
+    const heap = new Heap();
+    const start = idx(home.x, home.y);
+    search.touch(start);
+    dist[start] = 0;
+    heap.push(start, 0);
+    let best = -1;
+    let bestScore = -Infinity;
+    while (heap.size) {
+      const i = heap.pop();
+      if (closed[i]) continue;
+      closed[i] = 1;
+      if (dist[i] > budget) break;
+      if (i !== start) {
+        let sc: number;
+        if (mark !== null) sc = -Math.hypot(tx(i) - tx(mark), ty(i) - ty(mark)) * 3 + gain[i] * 0.1;
+        else {
+          sc = gain[i] + hash2(tx(i), ty(i), state.day) * 3;
+          for (const o of others) {
+            const dd = Math.hypot(tx(o) - tx(i), ty(o) - ty(i));
+            if (dd < 12) sc -= (12 - dd) * 2;
+          }
+        }
+        if (sc > bestScore) (bestScore = sc), (best = i);
+      }
+      const x = tx(i);
+      const y = ty(i);
+      for (const [dx, dy] of N4) {
+        if (!inBounds(x + dx, y + dy)) continue;
+        const j = idx(x + dx, y + dy);
+        if (closed[j]) continue;
+        const c = scoutCost(map, net, j);
+        if (!isFinite(c)) continue;
+        const nd = dist[i] + c;
+        if (nd < dist[j]) {
+          if (dist[j] === Infinity) search.touch(j);
+          dist[j] = nd;
+          prev[j] = i;
+          gain[j] = gain[i] + unknown(j, rb) / (2 * rb + 1);
+          heap.push(j, nd);
         }
       }
-      if (sc > bestScore) (bestScore = sc), (best = i);
     }
-    const x = tx(i);
-    const y = ty(i);
-    for (const [dx, dy] of N4) {
-      if (!inBounds(x + dx, y + dy)) continue;
-      const j = idx(x + dx, y + dy);
-      if (closed[j]) continue;
-      const c = scoutCost(map, net, j);
-      if (!isFinite(c)) continue;
-      const nd = dist[i] + c;
-      if (nd < dist[j]) {
-        dist[j] = nd;
-        prev[j] = i;
-        gain[j] = gain[i] + unknown(j, rb) / (2 * rb + 1);
-        heap.push(j, nd);
-      }
-    }
-  }
-  if (best < 0) return null;
-  if (mark !== null && gain[best] < 4 && Math.hypot(tx(best) - tx(mark), ty(best) - ty(mark)) > rb + 2) {
-    // The marked land is out of reach on foot: give up on it and scout what can be reached.
+    if (best < 0) return null;
+    // The marked land is out of reach on foot.
+    if (mark !== null && gain[best] < 4 && Math.hypot(tx(best) - tx(mark), ty(best) - ty(mark)) > rb + 2) return 'unreachable';
+    if (gain[best] < 4) return null;
+    const out: number[] = [];
+    for (let k = best; k >= 0; k = prev[k]) out.push(k);
+    out.reverse();
+    return { path: [...out, ...out.slice(0, -1).reverse()], turn: out.length - 1, gain: gain[best] };
+  });
+  if (plan === 'unreachable') {
+    // Give up on the marked land and scout what can be reached.
     state.exploreTarget = null;
     note(state, 'Your scouts can find no way on foot to the marked land.', 'info');
     return planTrip(state, town);
   }
-  if (gain[best] < 4) return null;
-  const out: number[] = [];
-  for (let k = best; k >= 0; k = prev[k]) out.push(k);
-  out.reverse();
-  return { path: [...out, ...out.slice(0, -1).reverse()], turn: out.length - 1, gain: gain[best] };
+  return plan;
 }
 
 /** Scouts of a settlement: all of them (home or away), and those home, rested and ready to go. */

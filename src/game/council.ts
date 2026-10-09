@@ -7,9 +7,10 @@ import { buildingAvailability, placeBuilding, research, setJobTarget, techStatus
 import { BUILDING_DEFS, MAP_H, MAP_W, TECH_DEFS, TECH_ORDER } from './data';
 import { choiceOf, nextPath, pathRequirements, tweak } from './decisions';
 import { canAfford, canPlace, census, derived, invalidate, SPECIALTY_NAMES, type Derived, type Specialty } from './derived';
-import { blocked, catchmentAt, centerOf, dryLand, hearthOf, layerSum, prepNeeded, ringOf, sizeOf, tilesOf } from './land';
+import { blocked, catchmentAt, centerOf, dryLand, hearthOf, layerSum, prepNeeded, ringOffsets, sizeOf, tilesOf } from './land';
 import { getMap, idx, inBounds, N4, N8, tx, ty } from './map';
 import { townCalling, unpaved } from './realm';
+import { withSearch } from './scratch';
 import { baseRate, foodDemand, gathererCapacity, jobOutput, pastureYield, popSummary, yieldEff, type TickContext } from './sim';
 import { eraOf, hasTech, seasonIndex } from './state';
 import type { Building, BuildingId, Cost, GameState, JobId, ResourceId, TechId } from './types';
@@ -106,27 +107,32 @@ function siteScore(state: GameState, type: BuildingId, i: number, mult: number, 
   const [w, hh] = sizeOf(type);
   const [cx, cy] = centerOf({ type, x, y });
   const dist = Math.hypot(cx - h.x, cy - h.y);
-  const ring = ringOf(x, y, w, hh).filter(([xx, yy]) => inBounds(xx, yy));
-  const around = (types: BuildingId[]) => {
-    let k = 0;
-    for (const [xx, yy] of ring) {
-      const t = at.get(idx(xx, yy));
-      if (t && types.includes(t)) k++;
-    }
-    return k;
-  };
+  const offs = ringOffsets(w, hh);
+  const ring: number[] = [];
   let roadAdj = false;
   let free = 0;
   let water = false;
-  for (const [xx, yy] of ring) {
+  for (let k = 0; k < offs.dx.length; k++) {
+    const xx = x + offs.dx[k];
+    const yy = y + offs.dy[k];
+    if (!inBounds(xx, yy)) continue;
     const j = idx(xx, yy);
+    ring.push(j);
     const t = map.terrain[j];
     if (t === T.River || t === T.Water) water = true;
-    if (xx >= x && xx < x + w ? true : yy >= y && yy < y + hh) {
+    if (!offs.corner[k]) {
       if (d.network[j]) roadAdj = true;
       if (!d.occupied[j] && !blocked(map, j)) free++;
     }
   }
+  const around = (types: BuildingId[]) => {
+    let k = 0;
+    for (const j of ring) {
+      const t = at.get(j);
+      if (t && types.includes(t)) k++;
+    }
+    return k;
+  };
   const ter = map.terrain[i];
   const fertile = water && (ter === T.Grass || ter === T.Meadow);
   const catchSum = (layer: 'wood' | 'stone' | 'ore' | 'life') => layerSum(state, layer, catchmentAt(state, type, x, y, layer));
@@ -245,75 +251,78 @@ export function bridgeTile(state: GameState): number | null {
   if (count(state, 'bridge') >= 8) return null;
   const map = getMap(state.seed);
   const d = derived(state);
-  const n = MAP_W * MAP_H;
   // Label the unreachable patches of land and value what they hold inside the territory.
-  const label = new Int32Array(n).fill(-1);
-  const value: number[] = [];
-  const bridgeAt = new Set(state.buildings.filter((b) => b.type === 'bridge').map((b) => idx(b.x, b.y)));
-  const pending = state.buildings.some((b) => b.type === 'bridge' && !b.done);
-  const component = (start: number) => {
-    if (label[start] >= 0) return value[label[start]];
-    const id = value.length;
-    let v = 0;
-    const queue = [start];
-    label[start] = id;
-    for (let q = 0; q < queue.length && q < 600; q++) {
-      const i = queue[q];
-      if (d.territory[i] && state.explored[i]) {
-        v += 1 + (map.feature[i] === F.Ore ? 8 : 0) + (map.feature[i] === F.Game ? 4 : 0) + (map.terrain[i] === T.Hills ? 1 : 0);
-        for (const [dx, dy] of N8) {
-          const xx = tx(i) + dx;
-          const yy = ty(i) + dy;
-          if (inBounds(xx, yy) && (map.terrain[idx(xx, yy)] === T.Mountain || map.terrain[idx(xx, yy)] === T.Hills)) {
-            v += 0.3;
-            break;
+  return withSearch((search) => {
+    const label = search.prev;
+    const value: number[] = [];
+    const bridgeAt = new Set(state.buildings.filter((b) => b.type === 'bridge').map((b) => idx(b.x, b.y)));
+    const pending = state.buildings.some((b) => b.type === 'bridge' && !b.done);
+    const component = (start: number) => {
+      if (label[start] >= 0) return value[label[start]];
+      const id = value.length;
+      let v = 0;
+      const queue = [start];
+      search.touch(start);
+      label[start] = id;
+      for (let q = 0; q < queue.length && q < 600; q++) {
+        const i = queue[q];
+        if (d.territory[i] && state.explored[i]) {
+          v += 1 + (map.feature[i] === F.Ore ? 8 : 0) + (map.feature[i] === F.Game ? 4 : 0) + (map.terrain[i] === T.Hills ? 1 : 0);
+          for (const [dx, dy] of N8) {
+            const xx = tx(i) + dx;
+            const yy = ty(i) + dy;
+            if (inBounds(xx, yy) && (map.terrain[idx(xx, yy)] === T.Mountain || map.terrain[idx(xx, yy)] === T.Hills)) {
+              v += 0.3;
+              break;
+            }
           }
         }
+        for (const [dx, dy] of N4) {
+          const xx = tx(i) + dx;
+          const yy = ty(i) + dy;
+          if (!inBounds(xx, yy)) continue;
+          const j = idx(xx, yy);
+          if (label[j] >= 0 || d.reach[j] || blocked(map, j)) continue;
+          search.touch(j);
+          label[j] = id;
+          queue.push(j);
+        }
       }
+      value.push(v);
+      return v;
+    };
+    let best: number | null = null;
+    let bestScore = -Infinity;
+    for (const i of d.terrTiles) {
+      if (map.terrain[i] !== T.River || !state.explored[i] || d.occupied[i]) continue;
+      const x = tx(i);
+      const y = ty(i);
       for (const [dx, dy] of N4) {
-        const xx = tx(i) + dx;
-        const yy = ty(i) + dy;
-        if (!inBounds(xx, yy)) continue;
-        const j = idx(xx, yy);
-        if (label[j] >= 0 || d.reach[j] || blocked(map, j)) continue;
-        label[j] = id;
-        queue.push(j);
+        if (!inBounds(x - dx, y - dy) || !inBounds(x + dx, y + dy)) continue;
+        const near = idx(x - dx, y - dy);
+        const fromBridge = bridgeAt.has(near);
+        if (!fromBridge && !(d.reach[near] && !blocked(map, near))) continue;
+        // While a bridge is going up, only carry on across the same river.
+        if (pending && !fromBridge) continue;
+        let far = idx(x + dx, y + dy);
+        let span = 1;
+        if (map.terrain[far] === T.River && inBounds(x + 2 * dx, y + 2 * dy)) {
+          far = idx(x + 2 * dx, y + 2 * dy);
+          span = 2;
+        }
+        if (!dryLand(map, far) || d.reach[far]) continue;
+        const v = component(far);
+        if (v < 8) continue;
+        const own = hearthOf(state, d.townAt[i]);
+        const score = Math.min(v, 60) / span - Math.hypot(x - own.x, y - own.y) * 0.8;
+        if (score > bestScore && canPlace(state, 'bridge', i).ok) {
+          bestScore = score;
+          best = i;
+        }
       }
     }
-    value.push(v);
-    return v;
-  };
-  let best: number | null = null;
-  let bestScore = -Infinity;
-  for (const i of d.terrTiles) {
-    if (map.terrain[i] !== T.River || !state.explored[i] || d.occupied[i]) continue;
-    const x = tx(i);
-    const y = ty(i);
-    for (const [dx, dy] of N4) {
-      if (!inBounds(x - dx, y - dy) || !inBounds(x + dx, y + dy)) continue;
-      const near = idx(x - dx, y - dy);
-      const fromBridge = bridgeAt.has(near);
-      if (!fromBridge && !(d.reach[near] && !blocked(map, near))) continue;
-      // While a bridge is going up, only carry on across the same river.
-      if (pending && !fromBridge) continue;
-      let far = idx(x + dx, y + dy);
-      let span = 1;
-      if (map.terrain[far] === T.River && inBounds(x + 2 * dx, y + 2 * dy)) {
-        far = idx(x + 2 * dx, y + 2 * dy);
-        span = 2;
-      }
-      if (!dryLand(map, far) || d.reach[far]) continue;
-      const v = component(far);
-      if (v < 8) continue;
-      const own = hearthOf(state, d.townAt[i]);
-      const score = Math.min(v, 60) / span - Math.hypot(x - own.x, y - own.y) * 0.8;
-      if (score > bestScore && canPlace(state, 'bridge', i).ok) {
-        bestScore = score;
-        best = i;
-      }
-    }
-  }
-  return best;
+    return best;
+  });
 }
 
 /** Whether the best spot for a new camp or lodge has woods or a healthy herd that no other workplace already works. */
