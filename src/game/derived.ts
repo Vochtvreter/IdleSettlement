@@ -1,19 +1,97 @@
-import { BUILDING_DEFS, JOB_DEFS, MAP_H, MAP_W, RESOURCE_DEFS } from './data';
-import { getMap, idx, inBounds, isWater, N4, tx, ty } from './map';
+import { BIOMES, BUILDING_DEFS, JOB_DEFS, MAP_H, MAP_W, RESOURCE_DEFS, TIERS } from './data';
+import { getMap, idx, inBounds, isSea, N4, tx, ty } from './map';
 import { fxMul } from './decisions';
-import { blocked, catchmentAt, computeReach, dryLand, hearthOf, isStreet, landMax, layerSum, wooded } from './land';
+import {
+  blocked,
+  catchmentAt,
+  centerOf,
+  computeReach,
+  footprint,
+  hearths,
+  isStreet,
+  landMax,
+  layerSum,
+  networkMask,
+  passableMask,
+  ringCorner,
+  ringOf,
+  sizeOf,
+  takenMask,
+  terrainAt,
+  tilesOf,
+  wooded,
+} from './land';
+import { ADULT_AGE, DAYS_PER_YEAR, ELDER_AGE } from './data';
 import { eraOf, hasTech } from './state';
 import type { Building, BuildingId, GameState, JobId, LandLayer, ResourceId, Resources } from './types';
-import { F, JOBS, RESOURCES, T } from './types';
+import { Biome, F, JOBS, RESOURCES, T } from './types';
 
 export interface SlotGroup {
   mult: number;
   count: number;
   building: number | null;
+  town: number;
+}
+
+/** How a settlement's goods reach the rest of the realm. */
+export type Link = 'capital' | 'road' | 'route' | 'trail' | 'none';
+
+/** Share of a settlement's output that reaches the realm's stores, by how it is linked to the capital. */
+export const HAUL: Record<Link, number> = { capital: 1, road: 1, route: 1, trail: 0.85, none: 0.5 };
+
+/** What a settlement lives by, judged from its workplaces. */
+export type Specialty = 'farming' | 'herding' | 'timber' | 'hunting' | 'mining' | 'quarrying' | 'port' | 'crafts' | 'learning' | 'temple';
+
+export const SPECIALTY_NAMES: Record<Specialty, string> = {
+  farming: 'Farming',
+  herding: 'Herding',
+  timber: 'Timber',
+  hunting: 'Hunting',
+  mining: 'Mining',
+  quarrying: 'Quarry',
+  port: 'Harbour',
+  crafts: 'Craft',
+  learning: 'Scholars’',
+  temple: 'Temple',
+};
+
+const SPECIALTY_OF: Partial<Record<BuildingId, [Specialty, number]>> = {
+  farm: ['farming', 1],
+  granary: ['farming', 0.5],
+  pasture: ['herding', 1.2],
+  lumber: ['timber', 1],
+  lodge: ['hunting', 1],
+  mine: ['mining', 1.5],
+  quarry: ['quarrying', 1],
+  harbour: ['port', 2.5],
+  smithy: ['crafts', 1.2],
+  library: ['learning', 1.2],
+  shrine: ['temple', 1],
+};
+
+export interface TownInfo {
+  housing: number;
+  /** Finished buildings belonging to it (not counting its hearth). */
+  buildings: number;
+  counts: Partial<Record<BuildingId, number>>;
+  /** Job slots in its workplaces, after staffing by its own people (colonies only). */
+  slots: number;
+  /** Slots its workplaces would offer if fully staffed. */
+  fullSlots: number;
+  link: Link;
+  haul: number;
+  specialty: Specialty | null;
+  biome: Biome;
+  /** Landmass its hearth stands on. */
+  island: number;
 }
 
 export interface Derived {
   territory: Uint8Array;
+  /** Settlement each territory tile belongs to (the nearest hearth), 0 outside. */
+  townAt: Int32Array;
+  /** Territory tiles, for quick scans. */
+  terrTiles: number[];
   housing: number;
   stoneHousing: number;
   caps: Resources;
@@ -21,14 +99,19 @@ export interface Derived {
   slotGroups: Record<JobId, SlotGroup[]>;
   counts: Partial<Record<BuildingId, number>>;
   sites: Building[];
-  /** Tiles people can walk to from the hearth. */
+  towns: Map<number, TownInfo>;
+  /** Tiles people can walk to from a hearth. */
   reach: Uint8Array;
-  /** Tiles taken by buildings, roads and the village green. */
+  /** Tiles taken by buildings, roads, trails and the village greens. */
   occupied: Uint8Array;
+  /** Tiles of buildings still under construction (trees there stand until felled). */
+  siteMask: Uint8Array;
   /** Id of the building on each tile (0 for none). */
   buildingAt: Int32Array;
-  /** Road network tiles: roads, the green and bridges. */
+  /** Network tiles: roads, trails, the greens and bridges. */
   network: Uint8Array;
+  /** Trails blazed by pioneers. */
+  trail: Uint8Array;
   /** Open ground a new road could be laid across to reach the network. */
   roadable: Uint8Array;
   /** Forest that a lumber camp replants. */
@@ -39,15 +122,67 @@ export interface Derived {
   spent: Set<number>;
 }
 
-const memo = new WeakMap<GameState, { key: string; d: Derived }>();
+// ------------------------------------------------------------------ census
 
-function keyOf(state: GameState) {
-  let done = 0;
-  for (const b of state.buildings) if (b.done) done++;
-  return `${state.buildings.length}:${done}:${state.techs.length}:${state.claimed.length}:${state.nextBuildingId}:${state.landEpoch}:${state.roads.length}:${Object.values(state.decisions).join()}`;
+export interface Census {
+  residents: Map<number, number>;
+  adults: Map<number, number>;
+  /** People on the road with pioneers. */
+  away: number;
 }
 
-/** Values that only change when buildings, techs or discoveries change. Memoised per state. */
+const censusMemo = new WeakMap<GameState, { key: string; c: Census }>();
+const censusBump = new WeakMap<GameState, number>();
+
+/** Call after moving people between settlements. */
+export function recount(state: GameState) {
+  censusBump.set(state, (censusBump.get(state) ?? 0) + 1);
+}
+
+/** Who lives where. */
+export function census(state: GameState): Census {
+  const key = `${state.day}:${state.settlers.length}:${censusBump.get(state) ?? 0}:${state.towns.length}`;
+  const m = censusMemo.get(state);
+  if (m && m.key === key) return m.c;
+  const c: Census = { residents: new Map(), adults: new Map(), away: 0 };
+  for (const t of state.towns) {
+    c.residents.set(t.id, 0);
+    c.adults.set(t.id, 0);
+  }
+  for (const s of state.settlers) {
+    if (!s.town) {
+      c.away++;
+      continue;
+    }
+    c.residents.set(s.town, (c.residents.get(s.town) ?? 0) + 1);
+    const age = (state.day - s.born) / DAYS_PER_YEAR;
+    if (age >= ADULT_AGE && age < ELDER_AGE) c.adults.set(s.town, (c.adults.get(s.town) ?? 0) + 1);
+  }
+  censusMemo.set(state, { key, c });
+  return c;
+}
+
+// ------------------------------------------------------------------ memo
+
+const memo = new WeakMap<GameState, { key: string; d: Derived }>();
+
+function structureKey(state: GameState) {
+  let done = 0;
+  for (const b of state.buildings) if (b.done) done++;
+  return `${state.buildings.length}:${done}:${state.nextBuildingId}:${state.roads.length}:${state.trails.length}:${state.graded.length}:${state.towns.length}`;
+}
+
+function keyOf(state: GameState) {
+  // Colonies staff their workplaces with their own people, so their headcount matters here.
+  let colonies = '';
+  if (state.towns.length > 1) {
+    const c = census(state);
+    for (let k = 1; k < state.towns.length; k++) colonies += `${c.adults.get(state.towns[k].id) ?? 0},${state.towns[k].tier};`;
+  }
+  return `${structureKey(state)}:${state.techs.length}:${state.claimed.length}:${state.landEpoch}:${state.routes.length}:${state.towns[0]?.tier}:${Object.values(state.decisions).join()}:${colonies}`;
+}
+
+/** Values that only change when buildings, techs, discoveries or the settlements change. Memoised per state. */
 export function derived(state: GameState): Derived {
   const key = keyOf(state);
   const m = memo.get(state);
@@ -59,6 +194,7 @@ export function derived(state: GameState): Derived {
 
 export function invalidate(state: GameState) {
   memo.delete(state);
+  structMemo.delete(state);
 }
 
 export function jobUnlocked(state: GameState, j: JobId) {
@@ -66,62 +202,230 @@ export function jobUnlocked(state: GameState, j: JobId) {
   return !t || hasTech(state, t);
 }
 
+interface Structure {
+  reach: Uint8Array;
+  network: Uint8Array;
+  roadable: Uint8Array;
+  trail: Uint8Array;
+  /** Network component of each tile, over roads only and over roads and trails. */
+  roadComp: Int32Array;
+  fullComp: Int32Array;
+}
+
+const structMemo = new WeakMap<GameState, { key: string; s: Structure }>();
+
+/** The expensive flood fills: they only change when something is built or a road or trail is laid. */
+function structure(state: GameState): Structure {
+  const key = structureKey(state);
+  const m = structMemo.get(state);
+  if (m && m.key === key) return m.s;
+  const n = MAP_W * MAP_H;
+  const pass = passableMask(state);
+  const reach = computeReach(state, pass);
+  const network = networkMask(state);
+  const trail = new Uint8Array(n);
+  for (const i of state.trails) trail[i] = 1;
+  const roadable = roadableFrom(state, network);
+  const roadNet = new Uint8Array(n);
+  for (let i = 0; i < n; i++) if (network[i] && !trail[i]) roadNet[i] = 1;
+  const s: Structure = { reach, network, roadable, trail, roadComp: components(roadNet), fullComp: components(network) };
+  structMemo.set(state, { key, s });
+  return s;
+}
+
+/** Label the connected patches of a mask (N4); -1 outside it. */
+function components(mask: Uint8Array): Int32Array {
+  const n = mask.length;
+  const comp = new Int32Array(n).fill(-1);
+  let id = 0;
+  for (let i0 = 0; i0 < n; i0++) {
+    if (!mask[i0] || comp[i0] >= 0) continue;
+    const q = [i0];
+    comp[i0] = id;
+    for (let k = 0; k < q.length; k++) {
+      const i = q[k];
+      const x = tx(i);
+      const y = ty(i);
+      for (const [dx, dy] of N4) {
+        if (!inBounds(x + dx, y + dy)) continue;
+        const j = idx(x + dx, y + dy);
+        if (!mask[j] || comp[j] >= 0) continue;
+        comp[j] = id;
+        q.push(j);
+      }
+    }
+    id++;
+  }
+  return comp;
+}
+
+/** Territory radius of a hearth: it grows with the settlement, and the capital's also with every age. */
+export function hearthRadius(state: GameState, townId: number | undefined) {
+  const t = state.towns.find((x) => x.id === townId) ?? state.towns[0];
+  const reach = TIERS[t?.tier ?? 0].reach;
+  if (!t || t === state.towns[0]) return BUILDING_DEFS.campfire.territory + Math.max(2 * eraOf(state), reach);
+  return 4 + reach + (eraOf(state) >= 2 ? 1 : 0);
+}
+
+/** Housing a building gives: a new settlement's hearth shelters fewer than the capital's. */
+export function housingOf(state: GameState, b: Building) {
+  if (b.type === 'campfire' && (b.town ?? state.towns[0]?.id) !== state.towns[0]?.id) return 6;
+  return BUILDING_DEFS[b.type].housing ?? 0;
+}
+
 function compute(state: GameState): Derived {
-  const territory = new Uint8Array(MAP_W * MAP_H);
+  const n = MAP_W * MAP_H;
+  const capitalId = state.towns[0]?.id ?? 1;
+  const territory = new Uint8Array(n);
+  const townAt = new Int32Array(n);
   let housing = 0;
   let stoneHousing = 0;
   const caps = Object.fromEntries(RESOURCES.map((r) => [r, RESOURCE_DEFS[r].baseCap])) as Resources;
   const slotGroups = Object.fromEntries(JOBS.map((j) => [j, [] as SlotGroup[]])) as Record<JobId, SlotGroup[]>;
   const counts: Partial<Record<BuildingId, number>> = {};
   const sites: Building[] = [];
-  const n = MAP_W * MAP_H;
   const occupied = new Uint8Array(n);
+  const siteMask = new Uint8Array(n);
   const buildingAt = new Int32Array(n);
-  const network = new Uint8Array(n);
   const replant = new Uint8Array(n);
   const catchments = { wood: new Map(), stone: new Map(), ore: new Map(), life: new Map() } as Derived['catchments'];
   const spent = new Set<number>();
   const map = getMap(state.seed);
-  const hearth = hearthOf(state);
-  for (let dy = -1; dy <= 1; dy++)
-    for (let dx = -1; dx <= 1; dx++) {
-      if (!inBounds(hearth.x + dx, hearth.y + dy)) continue;
-      const i = idx(hearth.x + dx, hearth.y + dy);
-      if (!blocked(map, i)) occupied[i] = network[i] = 1;
-    }
-  for (const i of state.roads) occupied[i] = network[i] = 1;
+  const st = structure(state);
+  const { network, trail } = st;
+  for (let i = 0; i < n; i++) if (network[i]) occupied[i] = 1;
+
+  const towns = new Map<number, TownInfo>();
+  for (const t of state.towns) {
+    const hi = idx(t.x, t.y);
+    towns.set(t.id, { housing: 0, buildings: 0, counts: {}, slots: 0, fullSlots: 0, link: 'none', haul: HAUL.none, specialty: null, biome: map.biome[hi] as Biome, island: map.island[hi] });
+  }
+  const townOf = (b: Building) => (towns.has(b.town ?? capitalId) ? (b.town ?? capitalId) : capitalId);
 
   for (const b of state.buildings) {
-    const at = idx(b.x, b.y);
-    occupied[at] = 1;
-    buildingAt[at] = b.id;
-    if (b.type === 'bridge' || b.type === 'campfire') network[at] = 1;
+    const tiles = tilesOf(b);
+    for (const at of tiles) {
+      occupied[at] = 1;
+      buildingAt[at] = b.id;
+      if (!b.done) siteMask[at] = 1;
+    }
     if (!b.done) {
       sites.push(b);
       continue;
     }
     const def = BUILDING_DEFS[b.type];
     counts[b.type] = (counts[b.type] ?? 0) + 1;
+    const town = towns.get(townOf(b))!;
+    if (b.type !== 'campfire' && b.type !== 'bridge') {
+      town.buildings++;
+      town.counts[b.type] = (town.counts[b.type] ?? 0) + 1;
+    }
     for (const layer of ['wood', 'stone', 'ore', 'life'] as LandLayer[]) {
-      const tiles = catchmentAt(state, b.type, b.x, b.y, layer);
-      if (tiles.length) catchments[layer].set(b.id, tiles);
+      const ct = catchmentAt(state, b.type, b.x, b.y, layer);
+      if (ct.length) catchments[layer].set(b.id, ct);
     }
     if (b.type === 'lumber') for (const i of catchments.wood.get(b.id) ?? []) replant[i] = 1;
     if ((b.type === 'quarry' && layerSum(state, 'stone', catchments.stone.get(b.id) ?? []) < 0.5) || (b.type === 'mine' && layerSum(state, 'ore', catchments.ore.get(b.id) ?? []) < 0.5)) spent.add(b.id);
-    // The hearth's reach grows with every age the settlement enters.
-    const r = b.type === 'campfire' ? def.territory + 2 * eraOf(state) : def.territory;
-    for (let y = b.y - r; y <= b.y + r; y++)
-      for (let x = b.x - r; x <= b.x + r; x++) {
+    const r = b.type === 'campfire' ? hearthRadius(state, b.town) : def.territory;
+    const [cx, cy] = centerOf(b);
+    const [w, h] = sizeOf(b.type);
+    const R = Math.ceil(r + Math.max(w, h));
+    for (let y = Math.floor(cy) - R; y <= Math.ceil(cy) + R; y++)
+      for (let x = Math.floor(cx) - R; x <= Math.ceil(cx) + R; x++) {
         if (!inBounds(x, y)) continue;
-        if (Math.hypot(x - b.x, y - b.y) <= r + 0.5) territory[idx(x, y)] = 1;
+        if (Math.hypot(x - cx, y - cy) <= r + 0.5 + (Math.max(w, h) - 1) / 2) territory[idx(x, y)] = 1;
       }
-    housing += def.housing ?? 0;
-    if (b.type === 'house') stoneHousing += def.housing ?? 0;
+    const hs = housingOf(state, b);
+    housing += hs;
+    town.housing += hs;
+    if (b.type === 'house' || b.type === 'manor') stoneHousing += hs;
     for (const [res, amt] of Object.entries(def.storage ?? {})) caps[res as ResourceId] += amt!;
-    if (!spent.has(b.id))
-      for (const [job, k] of Object.entries(def.slots ?? {})) {
-        slotGroups[job as JobId].push({ mult: buildingMult(state, b), count: k!, building: b.id });
+  }
+
+  // --- how each settlement is linked to the capital
+  const ids = state.towns.map((t) => t.id);
+  const parent = new Map<number, number>(ids.map((i) => [i, i]));
+  const find = (a: number): number => {
+    while (parent.get(a) !== a) a = parent.get(a)!;
+    return a;
+  };
+  const union = (a: number, b: number) => parent.set(find(a), find(b));
+  const hcomp = (comp: Int32Array, t: { x: number; y: number }) => comp[idx(t.x, t.y)];
+  for (const a of state.towns)
+    for (const b of state.towns) if (a.id < b.id && hcomp(st.roadComp, a) >= 0 && hcomp(st.roadComp, a) === hcomp(st.roadComp, b)) union(a.id, b.id);
+  const roadRoot = new Map(ids.map((i) => [i, find(i)]));
+  for (const r of state.routes) if (towns.has(r.a) && towns.has(r.b)) union(r.a, r.b);
+  const routeRoot = new Map(ids.map((i) => [i, find(i)]));
+  for (const a of state.towns)
+    for (const b of state.towns) if (a.id < b.id && hcomp(st.fullComp, a) >= 0 && hcomp(st.fullComp, a) === hcomp(st.fullComp, b)) union(a.id, b.id);
+  for (const t of state.towns) {
+    const info = towns.get(t.id)!;
+    info.link =
+      t.id === capitalId ? 'capital' : roadRoot.get(t.id) === roadRoot.get(capitalId) ? 'road' : routeRoot.get(t.id) === routeRoot.get(capitalId) ? 'route' : find(t.id) === find(capitalId) ? 'trail' : 'none';
+    info.haul = HAUL[info.link];
+    let best: Specialty | null = null;
+    let bestV = 1.5;
+    const tally: Partial<Record<Specialty, number>> = {};
+    for (const [type, k] of Object.entries(info.counts)) {
+      const sp = SPECIALTY_OF[type as BuildingId];
+      if (!sp) continue;
+      tally[sp[0]] = (tally[sp[0]] ?? 0) + k! * sp[1];
+    }
+    for (const [sp, v] of Object.entries(tally)) if (v! > bestV) (bestV = v!), (best = sp as Specialty);
+    info.specialty = best;
+  }
+
+  // --- job slots: workplaces in a colony are staffed by its own people
+  const c = state.towns.length > 1 ? census(state) : null;
+  const raw: Map<number, { j: JobId; g: SlotGroup }[]> = new Map();
+  for (const b of state.buildings) {
+    if (!b.done || spent.has(b.id)) continue;
+    const def = BUILDING_DEFS[b.type];
+    const tid = townOf(b);
+    const info = towns.get(tid)!;
+    for (const [job, k] of Object.entries(def.slots ?? {})) {
+      const g: SlotGroup = { mult: buildingMult(state, b) * info.haul, count: k!, building: b.id, town: tid };
+      if (!raw.has(tid)) raw.set(tid, []);
+      raw.get(tid)!.push({ j: job as JobId, g });
+    }
+  }
+  for (const [tid, list] of raw) {
+    const info = towns.get(tid)!;
+    const full = list.reduce((s, e) => s + e.g.count, 0);
+    info.fullSlots = full;
+    const staff = tid === capitalId || !c ? full : c.adults.get(tid) ?? 0;
+    if (staff < full) {
+      // Too few hands for every workplace: the kinds of work found nowhere else in the realm are
+      // staffed first (a lone smithy before the sixth quarry), then the most productive.
+      const elsewhere = (j: JobId) => {
+        let k = 0;
+        for (const [t2, l2] of raw) if (t2 !== tid) for (const e of l2) if (e.j === j) k += e.g.count;
+        return k;
+      };
+      const scarce = new Map<JobId, number>();
+      for (const e of list) if (!scarce.has(e.j)) scarce.set(e.j, elsewhere(e.j));
+      const order = [...list].sort((a, b) => scarce.get(a.j)! - scarce.get(b.j)! || b.g.mult - a.g.mult || (a.g.building ?? 0) - (b.g.building ?? 0));
+      let left = staff;
+      const given = new Map<SlotGroup, number>();
+      // First one hand per kind of work, then fill up in order.
+      const seen = new Set<JobId>();
+      for (const e of order) {
+        if (left <= 0) break;
+        if (seen.has(e.j)) continue;
+        seen.add(e.j);
+        given.set(e.g, 1);
+        left--;
       }
+      for (const e of order) {
+        if (left <= 0) break;
+        const k = Math.min(left, e.g.count - (given.get(e.g) ?? 0));
+        given.set(e.g, (given.get(e.g) ?? 0) + k);
+        left -= k;
+      }
+      for (const e of list) e.g.count = given.get(e.g) ?? 0;
+    }
+    info.slots = list.reduce((s, e) => s + e.g.count, 0);
+    for (const e of list) if (e.g.count > 0) slotGroups[e.j].push({ mult: e.g.mult, count: e.g.count, building: e.g.building, town: e.g.town });
   }
 
   // Decision effects on storage.
@@ -138,20 +442,54 @@ function compute(state: GameState): Derived {
   slots.builder = Infinity;
   for (const j of JOBS) if (!jobUnlocked(state, j)) slots[j] = 0;
 
-  const reach = computeReach(state);
-  const roadable = roadableFrom(state, network);
-  return { territory, housing, stoneHousing, caps, slots, slotGroups, counts, sites, reach, occupied, buildingAt, network, roadable, replant, catchments, spent };
+  // Each territory tile belongs to the nearest hearth.
+  const hs = hearths(state);
+  const terrTiles: number[] = [];
+  for (let i = 0; i < n; i++) {
+    if (!territory[i]) continue;
+    terrTiles.push(i);
+    let best = capitalId;
+    let bd = Infinity;
+    for (const h of hs) {
+      const dd = (tx(i) - h.x) ** 2 + (ty(i) - h.y) ** 2;
+      if (dd < bd) (bd = dd), (best = h.town ?? capitalId);
+    }
+    townAt[i] = best;
+  }
+
+  return {
+    territory,
+    townAt,
+    terrTiles,
+    housing,
+    stoneHousing,
+    caps,
+    slots,
+    slotGroups,
+    counts,
+    sites,
+    towns,
+    reach: st.reach,
+    occupied,
+    siteMask,
+    buildingAt,
+    network,
+    trail,
+    roadable: st.roadable,
+    replant,
+    catchments,
+    spent,
+  };
 }
 
-/** Flood out from the road network over ground a road may cross (not buildings, water, rock or sacred sites). */
+/** Flood out from the network over ground a road may cross (not buildings, water, rock or sacred sites). */
 function roadableFrom(state: GameState, network: Uint8Array): Uint8Array {
   const map = getMap(state.seed);
   const n = MAP_W * MAP_H;
-  const taken = new Uint8Array(n);
-  for (const b of state.buildings) if (b.type !== 'bridge' && b.type !== 'campfire') taken[idx(b.x, b.y)] = 1;
+  const taken = takenMask(state);
   const out = new Uint8Array(n);
   const queue: number[] = [];
-  for (let i = 0; i < n; i++) if (network[i]) (out[i] = 1), queue.push(i);
+  for (let i = 0; i < n; i++) if (network[i] && !taken[i]) (out[i] = 1), queue.push(i);
   for (let q = 0; q < queue.length; q++) {
     const i = queue[q];
     const x = tx(i);
@@ -167,44 +505,61 @@ function roadableFrom(state: GameState, network: Uint8Array): Uint8Array {
   return out;
 }
 
-function countAround(state: GameState, x: number, y: number, pred: (t: number, f: number, i: number) => boolean, r = 1) {
+/** Count the tiles in the ring around a footprint that match. */
+function countRing(state: GameState, type: BuildingId, x: number, y: number, pred: (t: number, f: number, i: number) => boolean) {
   const map = getMap(state.seed);
+  const [w, h] = sizeOf(type);
   let n = 0;
-  for (let dy = -r; dy <= r; dy++)
-    for (let dx = -r; dx <= r; dx++) {
-      if (!dx && !dy) continue;
-      if (!inBounds(x + dx, y + dy)) continue;
-      const i = idx(x + dx, y + dy);
-      if (pred(map.terrain[i], map.feature[i], i)) n++;
-    }
+  for (const [xx, yy] of ringOf(x, y, w, h)) {
+    if (!inBounds(xx, yy)) continue;
+    const i = idx(xx, yy);
+    if (pred(map.terrain[i], map.feature[i], i)) n++;
+  }
   return n;
 }
 
-/** Output multiplier a building gives its workers, from what the land around it still holds. */
+/** The biome a building stands in (that of its centre). */
+export function biomeOf(state: GameState, b: { type: BuildingId; x: number; y: number }): Biome {
+  const [cx, cy] = centerOf(b);
+  return getMap(state.seed).biome[idx(Math.round(cx), Math.round(cy))] as Biome;
+}
+
+/** Output multiplier a building gives its workers, from what the land around it still holds and its climate. */
 export function buildingMult(state: GameState, b: { type: BuildingId; x: number; y: number }): number {
   const map = getMap(state.seed);
-  const here = idx(b.x, b.y);
+  const tiles = footprint(b.type, b.x, b.y) ?? [idx(b.x, b.y)];
+  const biome = biomeOf(state, b);
   switch (b.type) {
     case 'lumber': {
-      const n = countAround(state, b.x, b.y, (_t, _f, i) => wooded(state, i));
-      return 1 + 0.15 * n;
+      const n = countRing(state, b.type, b.x, b.y, (_t, _f, i) => wooded(state, i));
+      return 1 + 0.12 * Math.min(n, 8);
     }
     case 'lodge': {
-      const forest = countAround(state, b.x, b.y, (_t, _f, i) => wooded(state, i));
-      const game = countAround(state, b.x, b.y, (_t, f, i) => f === F.Game && state.explored[i] === 1 && state.land.life[i] >= 5, 3);
-      return Math.min(2, 1 + 0.06 * forest + 0.3 * game);
+      const forest = countRing(state, b.type, b.x, b.y, (_t, _f, i) => wooded(state, i));
+      let game = 0;
+      for (let y = b.y - 3; y <= b.y + 3; y++)
+        for (let x = b.x - 3; x <= b.x + 3; x++) {
+          if (!inBounds(x, y)) continue;
+          const i = idx(x, y);
+          if (map.feature[i] === F.Game && state.explored[i] === 1 && state.land.life[i] >= 5) game++;
+        }
+      return Math.min(2, 1 + 0.06 * forest + 0.3 * game) * BIOMES[biome].hunt;
     }
     case 'quarry': {
-      const n = countAround(state, b.x, b.y, (t, _f, i) => (t === T.Hills || t === T.Mountain || t === T.Peak) && state.land.stone[i] > 0);
-      return 1 + 0.1 * n + (map.terrain[here] === T.Hills && state.land.stone[here] > 0 ? 0.2 : 0);
+      const n = countRing(state, b.type, b.x, b.y, (t, _f, i) => (t === T.Hills || t === T.Mountain || t === T.Peak) && state.land.stone[i] > 0);
+      const on = tiles.some((i) => (map.terrain[i] === T.Hills || map.terrain[i] === T.Mountain) && state.land.stone[i] > 0);
+      return 1 + 0.07 * Math.min(n, 8) + (on ? 0.2 : 0);
     }
     case 'farm': {
-      const water = countAround(state, b.x, b.y, (t) => t === T.River || t === T.Water) > 0;
-      return 1 + (water ? 0.3 : 0) + (map.terrain[here] === T.Meadow ? 0.1 : 0);
+      const water = countRing(state, b.type, b.x, b.y, (t) => t === T.River || t === T.Water) > 0;
+      const meadow = tiles.filter((i) => map.terrain[i] === T.Meadow).length / tiles.length;
+      // A river turns even the desert green: an oasis farms as well as the mild lands.
+      const climate = water && biome === Biome.Arid ? 1 : BIOMES[biome].farm;
+      return (1 + (water ? 0.3 : 0) + 0.1 * meadow) * climate;
     }
     case 'mine': {
       const vein = (i: number) => map.feature[i] === F.Ore && state.land.ore[i] > 0;
-      return vein(here) || countAround(state, b.x, b.y, (_t, _f, i) => vein(i)) > 0 ? 2 : 1;
+      return tiles.some(vein) || countRing(state, b.type, b.x, b.y, (_t, _f, i) => vein(i)) > 0 ? 2 : 1;
     }
     default:
       return 1;
@@ -213,19 +568,32 @@ export function buildingMult(state: GameState, b: { type: BuildingId; x: number;
 
 export type PlaceCheck = { ok: true; mult: number } | { ok: false; reason: string };
 
-/** Whether a tile is free to build on: no trees, water, rock, road or other building, and reachable on foot. */
+/**
+ * Whether a building can go here (tile = top-left of its footprint): explored land in the territory,
+ * not water, a peak, sacred ground, a road or another building, and reachable on foot. Standing trees and
+ * rock are fine: the site is cleared and levelled before building starts.
+ */
 export function canPlace(state: GameState, type: BuildingId, tile: number, d: Derived = derived(state)): PlaceCheck {
   const map = getMap(state.seed);
   const def = BUILDING_DEFS[type];
-  if (!state.explored[tile]) return { ok: false, reason: 'Unexplored' };
-  if (!d.territory[tile]) return { ok: false, reason: 'Outside your territory' };
-  if (d.buildingAt[tile]) return { ok: false, reason: 'Occupied' };
-  if (d.occupied[tile]) return { ok: false, reason: d.network[tile] && !state.roads.includes(tile) ? 'The village green is kept open' : 'A road runs here' };
-  const t = map.terrain[tile] as T;
-  const f = map.feature[tile] as F;
   const x = tx(tile);
   const y = ty(tile);
+  const [w, h] = sizeOf(type);
+  const tiles = footprint(type, x, y);
+  if (!tiles) return { ok: false, reason: 'Off the edge of the world' };
+  if (type === 'campfire') return { ok: false, reason: 'Hearths are lit by pioneers' };
+  for (const i of tiles) {
+    if (!state.explored[i]) return { ok: false, reason: 'Unexplored' };
+    if (!d.territory[i]) return { ok: false, reason: 'Outside your territory' };
+    if (d.buildingAt[i]) return { ok: false, reason: 'Occupied' };
+    if (d.occupied[i]) return { ok: false, reason: d.trail[i] ? 'A trail runs here' : d.network[i] && !state.roads.includes(i) ? 'The village green is kept open' : 'A road runs here' };
+  }
+  if (def.tier) {
+    const town = state.towns.find((t) => t.id === d.townAt[tile]);
+    if (!town || town.tier < def.tier) return { ok: false, reason: `Only in a town or city` };
+  }
   if (def.rule === 'bridge') {
+    const t = map.terrain[tile];
     if (t !== T.River) return { ok: false, reason: 'Bridges span rivers' };
     for (const [dx, dy] of N4) {
       if (!inBounds(x + dx, y + dy) || !inBounds(x - dx, y - dy)) continue;
@@ -233,70 +601,99 @@ export function canPlace(state: GameState, type: BuildingId, tile: number, d: De
       const far = idx(x - dx, y - dy);
       const nearOk = (d.reach[near] && d.roadable[near] && !d.occupied[near]) || (d.network[near] && (d.reach[near] || state.buildings.some((b) => b.id === d.buildingAt[near] && b.type === 'bridge')));
       const farT = map.terrain[far];
-      if (nearOk && (dryLand(map, far) || farT === T.River)) return { ok: true, mult: 1 };
+      if (nearOk && (BUILDABLE_LAND(farT) || farT === T.River)) return { ok: true, mult: 1 };
     }
     return { ok: false, reason: 'Needs land you can reach on one bank' };
   }
-  if (isWater(t)) return { ok: false, reason: 'Water' };
-  if (t === T.Mountain || t === T.Peak) return { ok: false, reason: 'Too steep to build on' };
-  if (f === F.Ruins || f === F.Grove) return { ok: false, reason: 'Sacred ground' };
-  if (f === F.Berries && state.land.life[tile] > 0) return { ok: false, reason: 'A berry thicket grows here' };
-  if (f === F.Ore && type !== 'mine') return { ok: false, reason: 'An ore vein: keep it for a mine' };
-  if (wooded(state, tile)) return { ok: false, reason: 'Trees stand here: fell them first' };
-  if (isStreet(state, tile)) return { ok: false, reason: 'Kept clear as a way out of the green' };
-  if (!d.reach[tile]) return { ok: false, reason: 'Across the river: build a bridge' };
-  let access = false;
-  for (const [dx, dy] of N4) {
-    if (!inBounds(x + dx, y + dy)) continue;
-    const j = idx(x + dx, y + dy);
-    if (d.roadable[j] && !(d.occupied[j] && !d.network[j])) access = true;
+  let reached = false;
+  let rock = false;
+  for (const i of tiles) {
+    const t = terrainAt(state, i);
+    const f = map.feature[i] as F;
+    if (t === T.Water || t === T.Deep || t === T.River) return { ok: false, reason: 'Water' };
+    if (t === T.Peak) return { ok: false, reason: 'Too steep even to level' };
+    if (f === F.Ruins || f === F.Grove) return { ok: false, reason: 'Sacred ground' };
+    if (f === F.Berries && state.land.life[i] > 0) return { ok: false, reason: 'A berry thicket grows here' };
+    if (f === F.Ore && type !== 'mine') return { ok: false, reason: 'An ore vein: keep it for a mine' };
+    if (isStreet(state, i)) return { ok: false, reason: 'Kept clear as a way out of the green' };
+    if (t === T.Mountain) rock = true;
+    else if (d.reach[i]) reached = true;
+    else return { ok: false, reason: 'Across the river: build a bridge' };
   }
+  // A mountainside site must lean on ground people can reach.
+  let access = false;
+  for (const [xx, yy] of ringOf(x, y, w, h)) {
+    if (!inBounds(xx, yy) || ringCorner(x, y, w, h, xx, yy)) continue;
+    const j = idx(xx, yy);
+    if (d.roadable[j] && !(d.occupied[j] && !d.network[j])) access = true;
+    if (rock && d.reach[j]) reached = true;
+  }
+  if (!reached) return { ok: false, reason: 'Nobody can reach it' };
   if (!access) return { ok: false, reason: 'Boxed in: no road can reach it' };
-  if (cutsThrough(state, d, x, y)) return { ok: false, reason: 'It would block the way through' };
-  const steepNear = countAround(state, x, y, (tt) => tt === T.Mountain || tt === T.Peak) > 0;
-  const forest = landMax(state.seed).wood[tile] > 0;
+  if (cutsThrough(state, d, x, y, w, h)) return { ok: false, reason: 'It would block the way through' };
+  const steepNear = countRing(state, type, x, y, (tt) => tt === T.Mountain || tt === T.Peak) > 0 || tiles.some((i) => map.terrain[i] === T.Mountain);
+  const hillsAt = tiles.some((i) => map.terrain[i] === T.Hills);
   switch (def.rule) {
     case 'open':
-      if (!(t === T.Grass || t === T.Meadow || forest)) return { ok: false, reason: 'Needs open grassland' };
+      for (const i of tiles) {
+        const t = map.terrain[i];
+        if (!(t === T.Grass || t === T.Meadow || landMax(state.seed).wood[i] > 0)) return { ok: false, reason: 'Needs open grassland' };
+      }
       break;
     case 'quarry':
-      if (!(t === T.Hills || steepNear || countAround(state, x, y, (tt) => tt === T.Hills) > 0)) return { ok: false, reason: 'Needs hills or a mountainside' };
+      if (!(hillsAt || steepNear || countRing(state, type, x, y, (tt) => tt === T.Hills) > 0)) return { ok: false, reason: 'Needs hills or a mountainside' };
       break;
     case 'mine':
-      if (!(t === T.Hills || steepNear)) return { ok: false, reason: 'Needs hills or a mountainside' };
+      if (!(hillsAt || steepNear)) return { ok: false, reason: 'Needs hills or a mountainside' };
       break;
     case 'forest-edge':
-      if (!countAround(state, x, y, (_tt, _f, i) => wooded(state, i))) return { ok: false, reason: 'Needs standing forest beside it' };
+      if (!countRing(state, type, x, y, (_tt, _f, i) => wooded(state, i))) return { ok: false, reason: 'Needs standing forest beside it' };
+      break;
+    case 'coast':
+      if (!countRing(state, type, x, y, (_tt, _f, i) => isSea(map, i))) return { ok: false, reason: 'Needs the shore of the open sea' };
+      if (rock) return { ok: false, reason: 'Needs a low shore' };
       break;
     default:
-      if (!dryLand(map, tile)) return { ok: false, reason: 'Needs dry land' };
+      break;
   }
   return { ok: true, mult: buildingMult(state, { type, x, y }) };
 }
 
+function BUILDABLE_LAND(t: number) {
+  return t !== T.Water && t !== T.Deep && t !== T.River && t !== T.Peak;
+}
+
 /**
  * Whether a building here would split the open ground around it in two, closing off a lane or a pass.
- * Looks at the ring of eight neighbours: the open sides must all stay joined around the ring.
+ * Walks the ring of tiles around the footprint: the open stretches that touch its sides must all be one.
  */
-function cutsThrough(state: GameState, d: Derived, x: number, y: number) {
+function cutsThrough(state: GameState, d: Derived, x: number, y: number, w: number, h: number) {
   const map = getMap(state.seed);
-  const open = (dx: number, dy: number) => {
-    if (!inBounds(x + dx, y + dy)) return false;
-    const j = idx(x + dx, y + dy);
+  const ring = ringOf(x, y, w, h);
+  const open = ring.map(([xx, yy]) => {
+    if (!inBounds(xx, yy)) return false;
+    const j = idx(xx, yy);
     return !blocked(map, j) && !(d.occupied[j] && !d.network[j]);
-  };
-  const ring: [number, number][] = [[0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1]];
-  const o = ring.map(([dx, dy]) => open(dx, dy));
-  // Count runs of open orthogonal sides, joined around a corner only through an open diagonal.
-  let sides = 0;
+  });
+  if (open.every(Boolean)) return false;
+  const side = ring.map(([xx, yy]) => !ringCorner(x, y, w, h, xx, yy));
+  // Count circular runs of open cells that include at least one side cell.
+  const L = ring.length;
+  const startK = open.findIndex((o) => !o);
   let runs = 0;
-  for (let k = 0; k < 8; k += 2) {
-    if (!o[k]) continue;
-    sides++;
-    const prev = (k + 6) % 8;
-    if (!(o[prev] && o[(k + 7) % 8])) runs++;
+  let inRun = false;
+  let hasSide = false;
+  for (let s = 1; s <= L; s++) {
+    const k = (startK + s) % L;
+    if (open[k]) {
+      if (!inRun) (inRun = true), (hasSide = false);
+      if (side[k]) hasSide = true;
+    } else if (inRun) {
+      inRun = false;
+      if (hasSide) runs++;
+    }
   }
-  if (sides === 4 && o[1] && o[3] && o[5] && o[7]) return false;
+  if (inRun && hasSide) runs++;
   return runs > 1;
 }
 
@@ -318,4 +715,10 @@ export function refund(state: GameState, cost: Partial<Resources>, frac = 1) {
 
 export function buildingCount(state: GameState, type: BuildingId, includeSites = true) {
   return state.buildings.filter((b) => b.type === type && (includeSites || b.done)).length;
+}
+
+/** The building covering a tile, if any. */
+export function buildingOn(state: GameState, tile: number): Building | undefined {
+  const id = derived(state).buildingAt[tile];
+  return id ? state.buildings.find((b) => b.id === id) : undefined;
 }

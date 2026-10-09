@@ -1,5 +1,5 @@
 import type { BuildingId, Cost, JobId, ResourceId, TechId } from './types';
-import { T } from './types';
+import { Biome, T } from './types';
 
 /** Simulation calendar. */
 export const DAYS_PER_SEASON = 10;
@@ -8,8 +8,9 @@ export const SEASONS = ['Spring', 'Summer', 'Autumn', 'Winter'] as const;
 export const ADULT_AGE = 13;
 export const ELDER_AGE = 52;
 
-export const MAP_W = 72;
-export const MAP_H = 54;
+/** A world large enough for several cities, with oceans between its continents. */
+export const MAP_W = 240;
+export const MAP_H = 180;
 
 export interface ResourceDef {
   name: string;
@@ -137,7 +138,7 @@ export const JOB_DEFS: Record<JobId, JobDef> = {
   },
 };
 
-export type TerrainRule = 'land' | 'open' | 'quarry' | 'mine' | 'forest-edge' | 'bridge';
+export type TerrainRule = 'land' | 'open' | 'quarry' | 'mine' | 'forest-edge' | 'bridge' | 'coast';
 
 export interface BuildingDef {
   name: string;
@@ -157,10 +158,23 @@ export interface BuildingDef {
   materials?: Cost;
   /** Adjacency hint shown when placing. */
   hint?: string;
+  /** Footprint in tiles [width, height]; 1×1 when absent. */
+  size?: [number, number];
+  /** Smallest settlement tier (see TIERS) that may raise it. */
+  tier?: number;
 }
 
-/** Terrain that buildings may stand on. Forest only counts once its trees have been felled. */
-export const BUILDABLE: ReadonlySet<T> = new Set([T.Sand, T.Grass, T.Meadow, T.Forest, T.Dense, T.Hills]);
+/**
+ * Terrain that buildings may stand on. Standing trees are felled and rock is levelled first, as part of
+ * the site's preparation, so building on forest, hills or a mountainside simply takes longer.
+ */
+export const BUILDABLE: ReadonlySet<T> = new Set([T.Sand, T.Grass, T.Meadow, T.Forest, T.Dense, T.Hills, T.Mountain]);
+
+/** Work to level one tile of rock before anything can be built on it, and the stone it yields. */
+export const LEVEL_WORK: Partial<Record<T, number>> = { [T.Hills]: 3, [T.Mountain]: 30 };
+export const LEVEL_STONE: Partial<Record<T, number>> = { [T.Hills]: 4, [T.Mountain]: 20 };
+/** Work to fell one unit of standing timber when clearing a site. */
+export const FELL_WORK = 1 / 12;
 
 export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
   campfire: {
@@ -172,7 +186,6 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
     housing: 10,
     slots: { hunter: 2, woodcutter: 2, scholar: 2, scout: 2 },
     territory: 5,
-    max: 1,
     benefit: 'Housing 10',
   },
   hut: {
@@ -196,6 +209,7 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
     territory: 2,
     benefit: '+3 woodcutter slots',
     hint: 'Cleared land at a forest’s edge',
+    size: [2, 1],
   },
   lodge: {
     name: 'Hunting Lodge',
@@ -219,6 +233,7 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
     storage: { food: 60, wood: 100, stone: 100, hides: 40, ore: 60, tools: 40 },
     territory: 2,
     benefit: '+100 wood & stone storage',
+    size: [2, 1],
   },
   quarry: {
     name: 'Quarry',
@@ -231,6 +246,7 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
     territory: 2,
     benefit: '+4 quarrier slots',
     hint: 'On hills, or beside mountains',
+    size: [2, 2],
   },
   farm: {
     name: 'Farm',
@@ -243,6 +259,7 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
     territory: 2,
     benefit: '+4 farmer slots',
     hint: 'Open land, best by water',
+    size: [2, 2],
   },
   granary: {
     name: 'Granary',
@@ -286,6 +303,7 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
     rule: 'open',
     territory: 2,
     benefit: 'Up to +1.8 food, +0.15 hides /day',
+    size: [2, 2],
   },
   mine: {
     name: 'Mine',
@@ -309,6 +327,7 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
     slots: { smith: 2 },
     territory: 2,
     benefit: '+2 smith slots',
+    size: [2, 1],
   },
   library: {
     name: 'Library',
@@ -320,6 +339,7 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
     slots: { scholar: 3 },
     territory: 2,
     benefit: '+3 scholar slots, +10% knowledge',
+    size: [2, 1],
   },
   house: {
     name: 'Stone House',
@@ -343,6 +363,7 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
     territory: 3,
     max: 3,
     benefit: '+8 morale',
+    size: [2, 2],
   },
   bridge: {
     name: 'Bridge',
@@ -353,6 +374,34 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
     territory: 2,
     benefit: 'Opens the far bank',
     hint: 'On a river, next to land you can reach',
+  },
+  harbour: {
+    name: 'Harbour',
+    desc: 'A boathouse and pier on the sea. Galleys sail from here to chart unknown coasts, carry colonists overseas and keep trade routes across the water.',
+    cost: { wood: 60, stone: 20 },
+    work: 24,
+    tech: 'seafaring',
+    rule: 'coast',
+    storage: { food: 40, wood: 40 },
+    territory: 3,
+    benefit: 'Galleys, sea routes',
+    hint: 'On the shore of the open sea',
+    size: [2, 1],
+  },
+  manor: {
+    name: 'Town Block',
+    desc: 'Tall stone houses crowded around a courtyard, where a town packs its people in.',
+    cost: { wood: 40, stone: 110 },
+    work: 40,
+    tech: 'masonry',
+    rule: 'land',
+    housing: 24,
+    storage: { food: 60 },
+    territory: 2,
+    benefit: '+24 housing',
+    hint: 'In a town or city',
+    size: [2, 2],
+    tier: 2,
   },
   monument: {
     name: 'The Sunspire',
@@ -365,6 +414,7 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
     territory: 6,
     max: 1,
     benefit: 'Victory!',
+    size: [2, 2],
   },
 };
 
@@ -381,10 +431,12 @@ export const BUILD_ORDER: BuildingId[] = [
   'herbalist',
   'pasture',
   'house',
+  'manor',
   'mine',
   'smithy',
   'library',
   'shrine',
+  'harbour',
   'monument',
 ];
 
@@ -422,7 +474,7 @@ export const TECH_DEFS: Record<TechId, TechDef> = {
 
   agriculture: { name: 'Agriculture', era: 1, cost: { knowledge: 45 }, desc: 'Unlocks Farms and Farmers.' },
   pottery: { name: 'Pottery', era: 1, cost: { knowledge: 45, stone: 20 }, desc: 'Unlocks Granaries to store the harvest.' },
-  scouting: { name: 'Pathfinding', era: 1, cost: { knowledge: 40 }, desc: 'Unlocks Watchtowers. Scouts +50%.' },
+  scouting: { name: 'Pathfinding', era: 1, cost: { knowledge: 40 }, desc: 'Unlocks Watchtowers. Scouts +50%. Pioneers can blaze trails into the wilds and found new settlements.' },
   herbalism: { name: 'Herbalism', era: 1, cost: { knowledge: 60 }, desc: 'Unlocks Herbalists and Healers.' },
   husbandry: { name: 'Animal Husbandry', era: 1, cost: { knowledge: 70, food: 40 }, requires: ['agriculture'], desc: 'Unlocks Pastures. Hunters +15%.' },
   era_bronze: { name: 'Chiefdom', era: 1, cost: { knowledge: 120, stone: 100 }, requires: ['agriculture'], minPop: 28, advancesTo: 2, desc: 'Unite the families under one chief. Enter the Age of Bronze.' },
@@ -431,7 +483,8 @@ export const TECH_DEFS: Record<TechId, TechDef> = {
   bronze: { name: 'Bronze Working', era: 2, cost: { knowledge: 150, ore: 30 }, requires: ['mining'], desc: 'Unlocks Smithies. Smiths turn ore into tools.' },
   writing: { name: 'Writing', era: 2, cost: { knowledge: 140 }, desc: 'Unlocks Libraries. Scholars +25%.' },
   masonry: { name: 'Masonry', era: 2, cost: { knowledge: 160, stone: 80 }, desc: 'Unlocks Stone Houses. Quarriers +25%.' },
-  the_wheel: { name: 'The Wheel', era: 2, cost: { knowledge: 130, wood: 80 }, desc: 'Builders +50%. Farmers +10%.' },
+  the_wheel: { name: 'The Wheel', era: 2, cost: { knowledge: 130, wood: 80 }, desc: 'Builders +50%. Farmers +10%. Carts can run trade routes between settlements.' },
+  seafaring: { name: 'Seafaring', era: 2, cost: { knowledge: 150, wood: 80 }, desc: 'Unlocks Harbours. Galleys chart the seas, carry colonists to other lands and sail trade routes.' },
   era_iron: { name: 'Township', era: 2, cost: { knowledge: 320, tools: 40 }, requires: ['bronze', 'writing'], minPop: 45, advancesTo: 3, desc: 'Laws, markets and roads. Enter the Age of Iron.' },
 
   iron: { name: 'Iron Smelting', era: 3, cost: { knowledge: 340, ore: 80 }, desc: 'Smiths +60%. Tools grant a larger bonus.' },
@@ -446,6 +499,55 @@ export const TECH_DEFS: Record<TechId, TechDef> = {
 
 export const TECH_ORDER = Object.keys(TECH_DEFS) as TechId[];
 
+export interface BiomeDef {
+  name: string;
+  desc: string;
+  /** Harvest multiplier for farms. */
+  farm: number;
+  /** Hunting multiplier (and the hides it yields). */
+  hunt: number;
+}
+
+export const BIOMES: Record<Biome, BiomeDef> = {
+  [Biome.Temperate]: { name: 'Temperate', desc: 'Mild lands of mixed woods and fertile meadows.', farm: 1, hunt: 1 },
+  [Biome.Boreal]: { name: 'Boreal', desc: 'Cold northern pine forest and tundra. Thin harvests, but rich in game and furs.', farm: 0.7, hunt: 1.25 },
+  [Biome.Arid]: { name: 'Arid', desc: 'Hot, dry steppe and desert. Little timber and thin soil except where a river waters an oasis, but the hills are rich in ore.', farm: 0.65, hunt: 0.8 },
+  [Biome.Tropical]: { name: 'Tropical', desc: 'Hot, wet jungle and lush coasts. Timber grows back fast, and fruit and fish abound.', farm: 1.15, hunt: 1 },
+};
+
+export interface TierDef {
+  name: string;
+  /** People living there. */
+  pop: number;
+  /** Finished buildings belonging to it. */
+  buildings: number;
+  /** Age the realm must have reached. */
+  era: number;
+  /** Extra territory around its hearth. */
+  reach: number;
+}
+
+/** How a settlement grows: from a pioneers' camp to a metropolis. */
+export const TIERS: TierDef[] = [
+  { name: 'Camp', pop: 0, buildings: 0, era: 0, reach: 0 },
+  { name: 'Village', pop: 12, buildings: 4, era: 0, reach: 1 },
+  { name: 'Town', pop: 32, buildings: 12, era: 1, reach: 3 },
+  { name: 'City', pop: 70, buildings: 24, era: 2, reach: 5 },
+  { name: 'Metropolis', pop: 150, buildings: 45, era: 3, reach: 7 },
+];
+
+/** Pioneers who set out to found a settlement, and what they take with them. */
+export const PIONEERS = 5;
+export const PIONEER_SUPPLIES: Cost = { food: 40, wood: 30 };
+/** A galley to carry them, or to sail a sea route. */
+export const GALLEY_COST: Cost = { wood: 60, hides: 10 };
+/** A land trade route: carts, and stone to pave the trail into a road (paved by builders, tile by tile). */
+export const CARAVAN_COST: Cost = { wood: 30 };
+export const PAVE_WORK = 1.5;
+export const PAVE_STONE = 1;
+/** New settlements keep this far from each other. */
+export const TOWN_SPACING = 15;
+
 export const TERRAIN_NAMES: Record<number, string> = {
   [T.Deep]: 'Deep Water',
   [T.Water]: 'Shallows',
@@ -459,6 +561,17 @@ export const TERRAIN_NAMES: Record<number, string> = {
   [T.Peak]: 'Snowy Peak',
   [T.River]: 'River',
 };
+
+/** Local names for terrain in each climate. */
+const BIOME_TERRAIN: Partial<Record<Biome, Partial<Record<number, string>>>> = {
+  [Biome.Boreal]: { [T.Grass]: 'Tundra', [T.Meadow]: 'Heath', [T.Forest]: 'Pine Forest', [T.Dense]: 'Taiga' },
+  [Biome.Arid]: { [T.Sand]: 'Desert', [T.Grass]: 'Steppe', [T.Meadow]: 'Savanna', [T.Forest]: 'Scrubland', [T.Dense]: 'Oasis Grove' },
+  [Biome.Tropical]: { [T.Forest]: 'Palm Forest', [T.Dense]: 'Jungle', [T.Meadow]: 'Lush Meadow' },
+};
+
+export function terrainName(t: number, biome: Biome = Biome.Temperate) {
+  return BIOME_TERRAIN[biome]?.[t] ?? TERRAIN_NAMES[t];
+}
 
 export const FEATURE_NAMES: Record<number, string> = {
   0: '',

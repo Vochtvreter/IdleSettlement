@@ -129,7 +129,7 @@ describe('resources run out', () => {
     const max = landMax(2).life[herd];
     expect(s.land.life[herd]).toBeCloseTo(max * LIFE_FLOOR, 5);
     const d = derived(s);
-    for (let k = 0; k < 60; k++) growLand(s, 1, { replant: d.replant, occupied: d.occupied, regrow: 1, replanting: true });
+    for (let k = 0; k < 60; k++) growLand(s, 1, { replant: d.replant, occupied: d.occupied, sites: d.siteMask, trail: d.trail, regrow: 1, replanting: true });
     expect(s.land.life[herd]).toBeGreaterThan(max * LIFE_FLOOR * 2);
   });
 

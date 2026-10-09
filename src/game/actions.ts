@@ -1,12 +1,12 @@
 import { BUILDING_DEFS, ERAS, JOB_DEFS, TECH_DEFS } from './data';
 import { buildingCount, canAfford, canPlace, derived, invalidate, pay, refund } from './derived';
 import { resolveChoice } from './events';
-import { clearTile, layRoad, roadPath } from './land';
+import { footprint, layRoad, prepNeeded, roadPath } from './land';
 import { idx } from './map';
 import { checkObjectives } from './objectives';
 import { eraOf, hasTech } from './state';
 import { log, type TickContext } from './sim';
-import type { BuildingId, FxEvent, GameState, JobId, TechId } from './types';
+import type { Building, BuildingId, FxEvent, GameState, JobId, TechId } from './types';
 
 export type ActionResult = { ok: true } | { ok: false; reason: string };
 
@@ -17,6 +17,7 @@ export function buildingUnlocked(state: GameState, type: BuildingId) {
 
 export function buildingAvailability(state: GameState, type: BuildingId): ActionResult {
   const def = BUILDING_DEFS[type];
+  if (type === 'campfire') return { ok: false, reason: 'Hearths are lit by pioneers' };
   if (!buildingUnlocked(state, type)) return { ok: false, reason: `Requires ${TECH_DEFS[def.tech!].name}` };
   if (def.max !== undefined && buildingCount(state, type) >= def.max) return { ok: false, reason: 'Limit reached' };
   if (!canAfford(state, def.cost)) return { ok: false, reason: 'Not enough resources' };
@@ -28,18 +29,37 @@ export function placeBuilding(state: GameState, type: BuildingId, tile: number, 
   if (!avail.ok) return avail;
   const check = canPlace(state, type, tile);
   if (!check.ok) return check;
-  // Every building is joined to the hearth by a road; somewhere a road cannot reach cannot be built.
-  const road = roadPath(state, tile);
+  // Every building is joined to a hearth by a road; somewhere a road cannot reach cannot be built.
+  const tiles = footprint(type, x, y)!;
+  const road = roadPath(state, tiles);
   if (!road) return { ok: false, reason: 'No road can reach this spot' };
   pay(state, BUILDING_DEFS[type].cost);
-  clearTile(state, tile);
-  state.buildings.push({ id: state.nextBuildingId++, type, x, y, progress: 0, done: false });
+  // Trees on the site stand until the builders fell them, and rock must be levelled: both are queued first.
+  const need = prepNeeded(state, type, x, y);
+  const b: Building = { id: state.nextBuildingId++, type, x, y, progress: 0, done: false, town: derived(state).townAt[tile] || state.towns[0]?.id };
+  if (need.level > 0) b.prep = need.level;
+  if (need.fell + need.level > 0.01) b.prepTotal = need.fell + need.level;
+  state.buildings.push(b);
   layRoad(state, road);
   invalidate(state);
   if (state.jobTargets.builder === 0 && derived(state).sites.length === 1) {
     // Helpful nudge: ensure at least one builder is wanted once construction begins.
     state.jobTargets.builder = 1;
   }
+  return { ok: true };
+}
+
+/** Sites in the order the builders work through them. */
+export function worksQueue(state: GameState): Building[] {
+  return state.buildings.filter((b) => !b.done).sort((a, b) => (a.order ?? a.id) - (b.order ?? b.id));
+}
+
+/** Move a site to the front of the works queue. */
+export function prioritise(state: GameState, id: number): ActionResult {
+  const q = worksQueue(state);
+  const b = q.find((x) => x.id === id);
+  if (!b) return { ok: false, reason: 'Not a construction site' };
+  b.order = Math.min(...q.map((x) => x.order ?? x.id)) - 1;
   return { ok: true };
 }
 

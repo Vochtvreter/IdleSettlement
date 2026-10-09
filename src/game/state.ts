@@ -6,7 +6,7 @@ import { Rng } from './rng';
 import type { GameState, JobId, Resources, Settler, TechId } from './types';
 import { JOBS, RESOURCES } from './types';
 
-export const SAVE_VERSION = 5;
+export const SAVE_VERSION = 6;
 
 export function emptyResources(): Resources {
   return Object.fromEntries(RESOURCES.map((r) => [r, 0])) as Resources;
@@ -30,7 +30,7 @@ export function newGame(seed: number, legacy = 0, now = Date.now()): GameState {
     settlers: [],
     nextId: 1,
     jobTargets,
-    buildings: [{ id: 1, type: 'campfire', x: tx(map.start), y: ty(map.start), progress: 0, done: true }],
+    buildings: [{ id: 1, type: 'campfire', x: tx(map.start), y: ty(map.start), progress: 0, done: true, town: 1 }],
     nextBuildingId: 2,
     techs: [],
     explored: new Array(MAP_W * MAP_H).fill(0),
@@ -55,6 +55,14 @@ export function newGame(seed: number, legacy = 0, now = Date.now()): GameState {
     cold: 0,
     land: initLand(seed),
     roads: [],
+    trails: [],
+    graded: [],
+    towns: [],
+    nextTownId: 2,
+    expeditions: [],
+    nextExpId: 1,
+    routes: [],
+    nextRouteId: 1,
     landEpoch: 0,
     eff: {},
     guide: [],
@@ -72,6 +80,8 @@ export function newGame(seed: number, legacy = 0, now = Date.now()): GameState {
     },
   };
 
+  state.towns.push({ id: 1, name: state.name, x: tx(map.start), y: ty(map.start), founded: 0, tier: 0, parent: null });
+
   const founders: [number, boolean][] = [
     [54, false],
     [36, true],
@@ -83,7 +93,7 @@ export function newGame(seed: number, legacy = 0, now = Date.now()): GameState {
     [5, true],
   ];
   for (const [age, f] of founders) {
-    state.settlers.push(makeSettler(state, rng, -age * DAYS_PER_YEAR - rng.int(0, DAYS_PER_YEAR - 1), 1, f));
+    state.settlers.push(makeSettler(state, rng, -age * DAYS_PER_YEAR - rng.int(0, DAYS_PER_YEAR - 1), 1, 1, f));
   }
   state.stats.peakPop = state.settlers.length;
 
@@ -105,9 +115,9 @@ export function newGame(seed: number, legacy = 0, now = Date.now()): GameState {
   return state;
 }
 
-export function makeSettler(state: GameState, rng: Rng, born: number, gen: number, f?: boolean): Settler {
+export function makeSettler(state: GameState, rng: Rng, born: number, gen: number, town: number, f?: boolean): Settler {
   const female = f ?? rng.chance(0.5);
-  return { id: state.nextId++, name: settlerName(rng, female), born, gen, job: null, f: female };
+  return { id: state.nextId++, name: settlerName(rng, female), born, gen, job: null, f: female, town };
 }
 
 export function ageOf(state: GameState, s: Settler): number {

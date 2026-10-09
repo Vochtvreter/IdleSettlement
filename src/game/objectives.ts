@@ -1,5 +1,6 @@
 import { MILESTONES } from './decisions';
 import { buildingCount } from './derived';
+import { getMap, idx } from './map';
 import { eraOf, hasTech } from './state';
 import type { GameState } from './types';
 
@@ -35,6 +36,19 @@ export function objectiveProgress(s: GameState, i: number): [number, number] {
       return [hasTech(s, 'architecture') ? 1 : 0, 1];
     case 13:
       return [s.victory ? 1 : 0, 1];
+    case 14:
+      return [Math.min(2, s.towns.length), 2];
+    case 15:
+      return [Math.min(1, s.routes.length), 1];
+    case 16:
+      return [s.towns.some((t) => t.tier >= 3) ? 1 : 0, 1];
+    case 17: {
+      const map = getMap(s.seed);
+      const home = map.island[idx(s.towns[0].x, s.towns[0].y)];
+      return [s.towns.some((t) => map.island[idx(t.x, t.y)] !== home) ? 1 : 0, 1];
+    }
+    case 18:
+      return [s.towns.some((t) => t.tier >= 4) ? 1 : 0, 1];
     default:
       return [1, 1];
   }

@@ -8,8 +8,10 @@ import {
   MAP_H,
   MAP_W,
 } from './data';
-import { derived, invalidate, jobUnlocked } from './derived';
-import { drawFrom, growLand, landFrac, landMax } from './land';
+import { census, derived, invalidate, jobUnlocked } from './derived';
+import { worksQueue } from './actions';
+import { centerOf, drawFrom, fellLeft, growLand, landFrac, landMax, prepareSite } from './land';
+import { loseTraveller, paveRoutes, realmDay, setRevealHook, townWithRoom, tradeKnowledge, tradeMorale } from './realm';
 import { runCouncil } from './council';
 import { fxAdd, fxMul } from './decisions';
 import { resolveChoice, rollEvent } from './events';
@@ -238,7 +240,7 @@ export function assignJobs(state: GameState) {
   const idle: Settler[] = [];
   for (const s of state.settlers) {
     const age = ageOf(state, s);
-    if (age < ADULT_AGE || age >= ELDER_AGE) {
+    if (age < ADULT_AGE || age >= ELDER_AGE || !s.town) {
       s.job = null;
       continue;
     }
@@ -268,11 +270,13 @@ export interface PopSummary {
   adults: number;
   elders: number;
   idle: number;
+  /** Pioneers on the road. */
+  away: number;
   jobs: Record<JobId, number>;
 }
 
-export function foodDemand(state: GameState, pop: { adults: number; children: number; elders: number }) {
-  return (pop.adults * 0.9 + pop.children * 0.5 + pop.elders * 0.7) * fxMul(state, 'foodUse');
+export function foodDemand(state: GameState, pop: { adults: number; children: number; elders: number; away?: number }) {
+  return (pop.adults * 0.9 + pop.children * 0.5 + pop.elders * 0.7 + (pop.away ?? 0) * 0.9) * fxMul(state, 'foodUse');
 }
 
 export function popSummary(state: GameState): PopSummary {
@@ -281,9 +285,11 @@ export function popSummary(state: GameState): PopSummary {
   let adults = 0;
   let elders = 0;
   let idle = 0;
+  let away = 0;
   for (const s of state.settlers) {
     const a = ageOf(state, s);
-    if (a < ADULT_AGE) children++;
+    if (!s.town) away++;
+    else if (a < ADULT_AGE) children++;
     else if (a >= ELDER_AGE) elders++;
     else {
       adults++;
@@ -291,7 +297,7 @@ export function popSummary(state: GameState): PopSummary {
       else idle++;
     }
   }
-  return { total: state.settlers.length, children, adults, elders, idle, jobs };
+  return { total: state.settlers.length, children, adults, elders, idle, away, jobs };
 }
 
 function add(rates: Rates | undefined, kind: 'prod' | 'cons', r: ResourceId, src: string, amt: number) {
@@ -331,6 +337,7 @@ export function moraleTarget(state: GameState, hungerNow: number, coldNow: numbe
   m -= 40 * hungerNow;
   m -= 25 * coldNow;
   m -= Math.min(25, (homeless / Math.max(1, pop)) * 60);
+  m += tradeMorale(state);
   m += modAdd(state, 'morale');
   m += fxAdd(state, 'morale');
   return Math.max(0, Math.min(100, m));
@@ -346,6 +353,7 @@ export function tick(state: GameState, ctx: TickContext) {
   state.modifiers = state.modifiers.filter((m) => m.until > state.day);
 
   runCouncil(state, ctx);
+  realmDay(state, ctx, rng);
   const d = derived(state);
   const jobs = assignJobs(state);
   const pop = popSummary(state);
@@ -423,6 +431,7 @@ export function tick(state: GameState, ctx: TickContext) {
     produce('knowledge', 'Scholars', k);
     const elderK = pop.elders * (hasTech(state, 'oral_tradition') ? 0.08 : 0.03) * legacyMult(state) * kf;
     produce('knowledge', 'Elders', elderK);
+    if (state.routes.length) produce('knowledge', 'Trade', tradeKnowledge(state) * kf);
   }
 
   // --- the land: worked-out quarries and mines, and regrowth
@@ -433,7 +442,7 @@ export function tick(state: GameState, ctx: TickContext) {
       b.spent = true;
       log(state, `The ${BUILDING_DEFS[b.type].name.toLowerCase()} at ${b.x},${b.y} has been worked out. Its workers must dig elsewhere.`, 'bad');
     }
-    growLand(state, season, { replant: dd.replant, occupied: dd.occupied, regrow: fxMul(state, 'regrow'), replanting: fxMul(state, 'replant') > 0 });
+    growLand(state, season, { replant: dd.replant, occupied: dd.occupied, sites: dd.siteMask, trail: dd.trail, regrow: fxMul(state, 'regrow'), replanting: fxMul(state, 'replant') > 0 });
   }
 
   // --- consumption
@@ -464,12 +473,20 @@ export function tick(state: GameState, ctx: TickContext) {
     state.res[r] = Math.max(0, Math.min(d.caps[r], state.res[r]));
   }
 
-  // --- construction
+  // --- construction: the works queue, one site after another. A site's trees are felled and its rock
+  // levelled before the building itself goes up; hands only move on when a site waits for materials.
   {
     const work = out('builder', jobs.builder) * 1 + pop.idle * 0.3 * prodMult;
     let left = work;
-    for (const b of state.buildings) {
-      if (b.done || left <= 0) continue;
+    for (const b of worksQueue(state)) {
+      if (left <= 0) break;
+      if (fellLeft(state, b) > 1e-6 || (b.prep ?? 0) > 1e-6) {
+        const r = prepareSite(state, b, left);
+        left -= r.used;
+        if (r.wood) add(rates, 'prod', 'wood', 'Clearing sites', r.wood);
+        if (r.stone) add(rates, 'prod', 'stone', 'Levelling', r.stone);
+        if (fellLeft(state, b) > 1e-6 || (b.prep ?? 0) > 1e-6) continue;
+      }
       const def = BUILDING_DEFS[b.type];
       const total = buildWork(state, b.type);
       const mats = buildMaterials(state, b.type);
@@ -489,6 +506,7 @@ export function tick(state: GameState, ctx: TickContext) {
       if (b.progress >= total - 1e-9) {
         b.done = true;
         b.progress = total;
+        delete b.order;
         state.stats.buildingsBuilt++;
         invalidate(state);
         ctx.fx.push({ kind: 'built', building: b.id });
@@ -499,11 +517,17 @@ export function tick(state: GameState, ctx: TickContext) {
             state.stats.victoryDay = state.day;
           }
         } else {
-          log(state, `A ${def.name} has been completed.`, 'build');
+          const town = state.towns.length > 1 ? state.towns.find((t) => t.id === b.town) : null;
+          log(state, `A ${def.name} has been completed${town ? ` in ${town.name}` : ''}.`, 'build');
         }
-        if (b.type === 'watchtower') revealAround(state, ctx, rng, b.x, b.y, 5);
+        if (b.type === 'watchtower') {
+          const [cx, cy] = centerOf(b);
+          revealAround(state, ctx, rng, Math.round(cx), Math.round(cy), 5);
+        }
       }
     }
+    // Spare hands pave the trade routes' trails into roads.
+    if (left > 0 && state.routes.length) paveRoutes(state, left, rates);
   }
 
   // --- exploration
@@ -512,23 +536,26 @@ export function tick(state: GameState, ctx: TickContext) {
     if (pts > 0) explore(state, ctx, rng, pts);
   }
 
-  // --- population: births
+  // --- population: births, where there is a free home in the mother's settlement
   {
-    const free = d.housing - state.settlers.length;
-    const housingF = free <= 0 ? 0 : Math.min(1, free / 3);
+    const c = census(state);
+    const free = new Map<number, number>();
+    for (const t of state.towns) free.set(t.id, (d.towns.get(t.id)?.housing ?? 0) - (c.residents.get(t.id) ?? 0));
     const foodF = state.hunger > 0.05 ? 0.1 : state.res.food < state.settlers.length * 3 ? 0.5 : 1;
     const moraleF = Math.max(0.25, Math.min(1.4, state.morale / 55));
-    const rate = (0.3 / DAYS_PER_YEAR) * housingF * foodF * moraleF * modMult(state, 'births') * fxMul(state, 'births');
-    const mothers = state.settlers.filter((s) => s.f && ageOf(state, s) >= 16 && ageOf(state, s) < 42);
+    const rate = (0.3 / DAYS_PER_YEAR) * foodF * moraleF * modMult(state, 'births') * fxMul(state, 'births');
+    const mothers = state.settlers.filter((s) => s.f && s.town && ageOf(state, s) >= 16 && ageOf(state, s) < 42);
     for (const mother of mothers) {
-      if (!rng.chance(rate)) continue;
-      const child = makeSettler(state, rng, state.day, mother.gen + 1);
+      const room = free.get(mother.town) ?? 0;
+      const housingF = room <= 0 ? 0 : Math.min(1, room / 3);
+      if (!rng.chance(rate * housingF)) continue;
+      free.set(mother.town, room - 1);
+      const child = makeSettler(state, rng, state.day, mother.gen + 1, mother.town);
       state.settlers.push(child);
       state.stats.births++;
       state.stats.maxGen = Math.max(state.stats.maxGen, child.gen);
       ctx.fx.push({ kind: 'birth', settler: child.id });
       log(state, `${child.name} was born to ${mother.name}.`, 'birth');
-      if (state.settlers.length >= d.housing) break;
     }
   }
 
@@ -592,6 +619,7 @@ export function killSettler(state: GameState, ctx: TickContext, s: Settler, caus
   const i = state.settlers.indexOf(s);
   if (i < 0) return;
   state.settlers.splice(i, 1);
+  if (!s.town) loseTraveller(state, s.id);
   state.stats.deaths++;
   ctx.fx.push({ kind: 'death', settler: s.id });
   const age = Math.floor(ageOf(state, s));
@@ -599,10 +627,10 @@ export function killSettler(state: GameState, ctx: TickContext, s: Settler, caus
   log(state, `${s.name}${role} died of ${cause} at age ${age}.`, 'death');
 }
 
-export function addSettlers(state: GameState, ctx: TickContext, rng: Rng, n: number, minAge = 16, maxAge = 34) {
+export function addSettlers(state: GameState, ctx: TickContext, rng: Rng, n: number, minAge = 16, maxAge = 34, town = townWithRoom(state)) {
   for (let k = 0; k < n; k++) {
     const age = rng.int(minAge, maxAge);
-    const s = makeSettler(state, rng, state.day - age * DAYS_PER_YEAR - rng.int(0, DAYS_PER_YEAR - 1), Math.max(1, state.stats.maxGen - 1));
+    const s = makeSettler(state, rng, state.day - age * DAYS_PER_YEAR - rng.int(0, DAYS_PER_YEAR - 1), Math.max(1, state.stats.maxGen - 1), town);
     state.settlers.push(s);
     ctx.fx.push({ kind: 'birth', settler: s.id });
   }
@@ -612,8 +640,13 @@ export function addSettlers(state: GameState, ctx: TickContext, rng: Rng, n: num
 
 // ---------------------------------------------------------------- exploration
 
-export function frontier(state: GameState): number[] {
-  const out: number[] = [];
+const frontierMemo = new WeakMap<GameState, { n: number; set: Set<number> }>();
+
+/** Unexplored tiles next to explored ones, kept up to date as tiles are revealed. */
+export function frontier(state: GameState): Set<number> {
+  let m = frontierMemo.get(state);
+  if (m && m.n === state.stats.tilesExplored) return m.set;
+  const set = new Set<number>();
   for (let y = 0; y < MAP_H; y++)
     for (let x = 0; x < MAP_W; x++) {
       const i = idx(x, y);
@@ -622,25 +655,37 @@ export function frontier(state: GameState): number[] {
         const nx = x + dx;
         const ny = y + dy;
         if (inBounds(nx, ny) && state.explored[idx(nx, ny)]) {
-          out.push(i);
+          set.add(i);
           break;
         }
       }
     }
-  return out;
+  m = { n: state.stats.tilesExplored, set };
+  frontierMemo.set(state, m);
+  return set;
 }
 
+function frontierReveal(state: GameState, i: number) {
+  const m = frontierMemo.get(state);
+  if (!m || m.n !== state.stats.tilesExplored - 1) return;
+  m.n++;
+  m.set.delete(i);
+  const x = tx(i);
+  const y = ty(i);
+  for (const [dx, dy] of N4) if (inBounds(x + dx, y + dy) && !state.explored[idx(x + dx, y + dy)]) m.set.add(idx(x + dx, y + dy));
+}
+
+/** Where scouts head when no land is marked: the unknown nearest any of the realm's hearths. */
 function nextExploreTile(state: GameState, rng: Rng): number | null {
-  const map = getMap(state.seed);
   const f = frontier(state);
-  if (!f.length) return null;
-  const target = state.exploreTarget ?? map.start;
-  const txx = tx(target);
-  const tyy = ty(target);
+  if (!f.size) return null;
+  const anchors = state.exploreTarget !== null ? [[tx(state.exploreTarget), ty(state.exploreTarget)]] : state.towns.map((t) => [t.x, t.y]);
   let best = -1;
   let bestScore = Infinity;
   for (const i of f) {
-    const score = Math.hypot(tx(i) - txx, ty(i) - tyy) + rng.next() * 2.5;
+    let dmin = Infinity;
+    for (const [ax, ay] of anchors) dmin = Math.min(dmin, Math.hypot(tx(i) - ax, ty(i) - ay));
+    const score = dmin + rng.next() * 2.5;
     if (score < bestScore) {
       bestScore = score;
       best = i;
@@ -678,9 +723,10 @@ export function revealAround(state: GameState, ctx: TickContext, rng: Rng, x: nu
     }
 }
 
-function revealTile(state: GameState, ctx: TickContext, rng: Rng, i: number) {
+export function revealTile(state: GameState, ctx: TickContext, rng: Rng, i: number) {
   state.explored[i] = 1;
   state.stats.tilesExplored++;
+  frontierReveal(state, i);
   const map = getMap(state.seed);
   const f = map.feature[i] as F;
   if (f === F.None || state.claimed.includes(i)) return;
@@ -732,3 +778,6 @@ function discover(state: GameState, ctx: TickContext, rng: Rng, i: number, f: F)
   }
   ctx.fx.push({ kind: 'discover', tile: i });
 }
+
+// Pioneers and galleys reveal the land they pass the way scouts do, discoveries and all.
+setRevealHook((state, ctx, i) => revealTile(state, ctx, new Rng((state.rng ^ (i * 2654435761)) | 0), i));
