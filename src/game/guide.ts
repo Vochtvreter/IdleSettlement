@@ -185,7 +185,7 @@ export const GUIDE: GuideStep[] = [
   {
     id: 'explore',
     title: 'Beyond the firelight',
-    text: 'Dark land on the map is unexplored. <b>Click or tap any dark area</b> to send your scouts there. Ruins, supply caches and wanderer camps are waiting.',
+    text: 'Dark land on the map is unexplored. Scouts set out in <b>parties</b> with a few weeks of provisions, make camp along the way and bring home what they have seen: only then does your settlement know the land. <b>Click or tap any dark area</b> to send the next parties there. The wilds are dangerous, and a party that stays out too long may never return.',
     after: 'welcome',
     when: (s) => s.objective === 3,
     until: (s) => s.claimed.length > 0,
@@ -236,10 +236,18 @@ export const GUIDE: GuideStep[] = [
   {
     id: 'trade',
     title: 'Trade',
-    text: 'A <b>trade route</b> joins two settlements by cart or galley. It brings knowledge and good cheer, the more between bigger places with different climates and trades, and goods from a joined settlement reach your stores in full. Builders pave land routes into roads.',
+    text: 'A <b>trade route</b> joins two settlements by cart or galley. Land routes grow by themselves: travellers wear a trail between settlements, the busiest ways become cart routes, and once they are busier still builders pave them into roads. Bigger places that lie closer together get there sooner. Routes bring knowledge and good cheer, and goods from a joined settlement reach your stores in full.',
     after: 'welcome',
     when: (s) => s.routes.length > 0,
     tab: 'realm',
+  },
+  {
+    id: 'renew',
+    title: 'Growing up',
+    text: 'Settlements rebuild themselves as they grow. Worked-out quarries and mines are cleared away, old huts near the hearth make way for stone houses, and in cities rows of homes become town blocks and the fields at the heart move out. You can <b>demolish</b> any building yourself from its inspector, too.',
+    after: 'welcome',
+    when: (s) => s.techs.includes('masonry') && s.towns.some((t) => t.tier >= 2),
+    tab: 'build',
   },
   {
     id: 'onward',

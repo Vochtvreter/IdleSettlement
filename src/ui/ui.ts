@@ -95,6 +95,7 @@ export class UI {
       [1, '1×', 'Normal speed (1)'],
       [2, '2×', 'Fast (2)'],
       [5, '5×', 'Very fast (3)'],
+      [10, '10×', 'The years fly by (4)'],
     ];
     for (const [n, label, title] of speeds) {
       const b = h('button', { class: 'icon-btn', title }, label);
@@ -347,7 +348,15 @@ export class UI {
     const sticky = tile === this.selected && this.inspectTile === null;
     if (!explored) {
       parts.push(h('div', { class: 'ih' }, img('i_scout', 3), h('div', null, h('div', { class: 'tt' }, 'Unexplored'), h('div', { class: 'ts' }, `${x}, ${y}`))));
-      parts.push(h('div', { class: 'desc' }, s.exploreTarget === tile ? 'Your scouts are heading this way.' : 'Click to send your scouts toward this land. Assign Scouts in the People tab.'));
+      const seen = s.expeditions.some((e) => e.kind === 'scout' && e.found?.includes(tile));
+      parts.push(
+        h(
+          'div',
+          { class: 'desc' },
+          (seen ? 'A scouting party out in the wilds has seen this land. It will be known once they bring word home. ' : '') +
+            (s.exploreTarget === tile ? 'The next scouting parties will head this way.' : 'Click to send the next scouting parties toward this land. Assign Scouts in the People tab.'),
+        ),
+      );
     } else if (b) {
       const def = BUILDING_DEFS[b.type];
       const p = b.done ? 1 : b.progress / buildWork(s, b.type);
@@ -437,7 +446,7 @@ export class UI {
         }
       } else if (!d.territory[tile] && s.techs.includes('scouting')) {
         // What pioneers would make of this place.
-        const v = siteValues(s.seed)[tile];
+        const v = siteValues(s.seed).at(tile);
         if (v > 0) {
           const p = siteProfile(s.seed, tile);
           parts.push(h('div', { class: 'row' }, 'As a home for pioneers', h('b', null, `${Math.round(v)} · ${siteCalling(p)}${p.water ? '' : ', no fresh water'}`)));
@@ -517,7 +526,7 @@ export class UI {
       setExploreTarget(s, tx(tile), ty(tile));
       sfx('click');
       const scouts = popSummary(s).jobs.scout;
-      this.toast(scouts ? 'Your scouts will head toward the marked land.' : 'Marked for exploration — assign Scouts in the People tab.', 'info', 'i_scout', 2500);
+      this.toast(scouts ? 'The next scouting parties will head toward the marked land.' : 'Marked for exploration — assign Scouts in the People tab.', 'info', 'i_scout', 2500);
       this.game.changed();
       return;
     }
@@ -748,7 +757,7 @@ export class UI {
         h('div', { class: 'stat' }, h('div', { class: 'k' }, 'Births · Deaths · Arrivals'), h('div', { class: 'v' }, `${r.births} · ${r.deaths} · ${r.arrivals}`)),
         ...rows,
       ),
-      h('p', { style: 'font-size:12px;color:var(--muted)' }, 'Time away passes at half speed, up to 12 years.'),
+      h('p', { style: 'font-size:12px;color:var(--muted)' }, 'Time away passes at half speed, up to 40 years.'),
       h('div', { class: 'acts' }, h('button', { class: 'btn primary', onclick: () => close() }, 'Welcome back')),
     ]);
   }
@@ -923,18 +932,18 @@ export class UI {
           h('h3', null, '4 · Survive the seasons'),
           h('ul', null, h('li', null, 'Winter brings little food and bitter cold. The council stockpiles; raise the winter reserve if people go hungry.')),
           h('h3', null, '5 · Explore and build'),
-          h('ul', null, h('li', null, 'Click any dark area of the map to send scouts there. Ruins, caches, wanderer camps and sacred groves await.'), h('li', null, 'Want a building somewhere specific? Commission it in the Build tab and click a glowing tile. Any land will do: forest is felled and rock levelled first, which takes time on a mountainside.'), h('li', null, 'Raise the Sunspire to win. Events and choices pop up along the way; they decide themselves if you ignore them.')),
+          h('ul', null, h('li', null, 'Scouts go out in parties with provisions for a trip, make camp along the way and bring home what they saw: the realm only knows the land once they are back. Click any dark area of the map to send the next parties there. Ruins, caches, wanderer camps and sacred groves await. The wilds are dangerous, the more so on long trips (a council setting).'), h('li', null, 'Want a building somewhere specific? Commission it in the Build tab and click a glowing tile. Any land will do: forest is felled and rock levelled first, which takes time on a mountainside.'), h('li', null, 'Raise the Sunspire to win. Events and choices pop up along the way; they decide themselves if you ignore them.')),
           h('h3', null, '6 · Grow a realm'),
-          h('ul', null, h('li', null, 'Pioneers blaze trails to the best land your scouts have found and found new settlements. Each grows from a camp into a village, town, city and metropolis, and takes up the trade its land suggests.'), h('li', null, 'With a harbour, galleys chart the seas and carry colonists to other lands and climates. Trade routes by cart or galley join it all together.'), h('li', null, 'The Realm tab lists your settlements, pioneers and routes. The minimap shows the known world: click it to look anywhere.')),
+          h('ul', null, h('li', null, 'Pioneers blaze trails to the best land your scouts have found and found new settlements. Each grows from a camp into a village, town, city and metropolis, and takes up the trade its land suggests.'), h('li', null, 'With a harbour, galleys chart the seas and carry colonists to other lands and climates. On land, travel between settlements wears trails, the busiest become cart routes and builders pave those into roads; galleys can sail sea routes between harbours.'), h('li', null, 'The Realm tab lists your settlements, pioneers and routes. The minimap shows the known world: click it to look anywhere.')),
           h('h3', null, 'Controls'),
           h(
             'ul',
             null,
             h('li', null, 'Drag to pan · scroll / pinch to zoom · ', h('span', { class: 'kbd' }, 'WASD'), ' pan'),
-            h('li', null, h('span', { class: 'kbd' }, 'Space'), ' pause · ', h('span', { class: 'kbd' }, '1'), h('span', { class: 'kbd' }, '2'), h('span', { class: 'kbd' }, '3'), ' speed · ', h('span', { class: 'kbd' }, 'H'), ' home · ', h('span', { class: 'kbd' }, 'M'), ' realm · ', h('span', { class: 'kbd' }, 'Esc'), ' cancel / menu'),
+            h('li', null, h('span', { class: 'kbd' }, 'Space'), ' pause · ', h('span', { class: 'kbd' }, '1'), h('span', { class: 'kbd' }, '2'), h('span', { class: 'kbd' }, '3'), h('span', { class: 'kbd' }, '4'), ' speed · ', h('span', { class: 'kbd' }, 'H'), ' home · ', h('span', { class: 'kbd' }, 'M'), ' realm · ', h('span', { class: 'kbd' }, 'Esc'), ' cancel / menu'),
             h('li', null, 'Shift-click: commission several buildings in a row'),
           ),
-          h('p', { style: 'color:var(--muted);font-size:13px' }, 'Your game saves automatically. While you are away, time passes at half speed (up to 12 years).'),
+          h('p', { style: 'color:var(--muted);font-size:13px' }, 'Your game saves automatically. While you are away, time passes at half speed (up to 40 years).'),
         ),
         h('div', { class: 'acts' }, h('button', { class: 'btn primary', onclick: () => close() }, 'Got it')),
       ],
@@ -970,6 +979,7 @@ export class UI {
       } else if (e.key === '1') this.game.setSpeed(1);
       else if (e.key === '2') this.game.setSpeed(2);
       else if (e.key === '3') this.game.setSpeed(5);
+      else if (e.key === '4') this.game.setSpeed(10);
       else if (e.key === 'h' || e.key === 'H') this.centerHearth();
       else if (e.key === 'e' || e.key === 'E') this.panels.setTab('decide');
       else if (e.key === 'p' || e.key === 'P') this.panels.setTab('people');

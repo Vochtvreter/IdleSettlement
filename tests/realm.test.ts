@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { DAYS_PER_YEAR, TIERS } from '../src/game/data';
+import { DAYS_PER_YEAR, TIERS, TRAFFIC_PAVE, TRAFFIC_ROUTE, TRAFFIC_TRAIL } from '../src/game/data';
 import { census, derived, invalidate } from '../src/game/derived';
 import { hearthOf, landMax, passableMask, TRAIL_WOOD, layRoad } from '../src/game/land';
 import { getMap, idx, inBounds, tx, ty } from '../src/game/map';
-import { findSites, launchPioneers, openRoute, routeOptions, tierFor, tradeKnowledge } from '../src/game/realm';
+import { desirePath, findSites, launchPioneers, pairKey, routeOptions, siteFree, siteValues, tierFor, trafficFlow, tradeKnowledge } from '../src/game/realm';
 import { Rng } from '../src/game/rng';
 import { deserialize, serialize } from '../src/game/save';
 import { emptyRates, tick, type TickContext } from '../src/game/sim';
@@ -188,23 +188,143 @@ describe('settlements', () => {
 });
 
 describe('trade routes', () => {
-  it('join two villages, bring knowledge and pave the trail', () => {
+  it('grow by themselves between two villages: carts once the way is busy, a paved road once it is busier', () => {
     const s = readyRealm(2, 20);
     found(s);
     s.techs.push('the_wheel');
     for (const t of s.towns) t.tier = 1;
-    s.res.wood = 200;
     s.res.stone = 200;
     invalidate(s);
-    const opt = routeOptions(s).find((o) => o.kind === 'land');
-    expect(opt?.ok, opt?.reason).toBe(true);
-    expect(openRoute(s, ctx(), s.towns[0].id, s.towns[1].id).ok).toBe(true);
+    expect(routeOptions(s).some((o) => o.kind === 'land')).toBe(false);
+    const key = pairKey(s.towns[0].id, s.towns[1].id);
+    s.traffic[key] = TRAFFIC_ROUTE - 1;
+    for (let k = 0; k < 10 && !s.routes.length; k++) tick(s, ctx());
+    expect(s.routes.length).toBe(1);
+    expect(s.routes[0].kind).toBe('land');
     expect(tradeKnowledge(s)).toBeGreaterThan(0);
     expect(derived(s).towns.get(s.towns[1].id)!.link).toMatch(/road|route/);
+    // Not busy enough to pave yet.
     const trails = s.trails.length;
     s.jobTargets.builder = 6;
+    s.traffic[key] = TRAFFIC_ROUTE;
+    for (let k = 0; k < 30; k++) tick(s, ctx());
+    expect(s.routes[0].paved).toBe(0);
+    s.traffic[key] = TRAFFIC_PAVE;
     for (let k = 0; k < 60; k++) tick(s, ctx());
     expect(s.trails.length).toBeLessThan(trails);
+  });
+
+  it('wear a trail between settlements that are not yet joined, preferring the ways already there', () => {
+    const s = readyRealm(2, 20);
+    found(s);
+    const [A, B] = s.towns;
+    // Forget the pioneers' trail: travellers must find their own way.
+    s.trails = [];
+    invalidate(s);
+    const path = desirePath(s, A, B)!;
+    expect(path[0]).toBe(idx(A.x, A.y));
+    expect(path[path.length - 1]).toBe(idx(B.x, B.y));
+    expect(trafficFlow(s, A, B)).toBeGreaterThan(0);
+    s.traffic[pairKey(A.id, B.id)] = TRAFFIC_TRAIL - 1;
+    for (let k = 0; k < 10; k++) tick(s, ctx());
+    expect(s.trails.length).toBeGreaterThan(5);
+    expect(s.routes.length).toBe(0);
+  });
+});
+
+describe('scouting parties', () => {
+  /** A young settlement with scouts and nobody deciding for them. */
+  function scouting(seed: number, scouts: number) {
+    const s = readyRealm(seed, 10);
+    // Only the hearth's surroundings are known.
+    const h = hearthOf(s);
+    for (let i = 0; i < s.explored.length; i++) s.explored[i] = Math.hypot(tx(i) - h.x, ty(i) - h.y) <= 6 ? 1 : 0;
+    s.stats.tilesExplored = s.explored.reduce((a, b) => a + b, 0);
+    s.council.jobs = false;
+    for (const j of Object.keys(s.jobTargets)) s.jobTargets[j as keyof typeof s.jobTargets] = 0;
+    s.jobTargets.gatherer = 6;
+    s.jobTargets.scout = scouts;
+    s.res.food = 500;
+    s.day = 2; // spring
+    invalidate(s);
+    return s;
+  }
+
+  it('set out together, make camp, and only bring what they saw home when they return', () => {
+    const s = scouting(1, 2);
+    for (let k = 0; k < 10 && !s.expeditions.length; k++) tick(s, ctx());
+    const e = s.expeditions.find((x) => x.kind === 'scout')!;
+    expect(e).toBeTruthy();
+    expect(e.people.length).toBe(2);
+    const known = s.stats.tilesExplored;
+    let camped = false;
+    let seen = 0;
+    for (let k = 0; k < 80 && s.expeditions.includes(e); k++) {
+      tick(s, ctx());
+      if ((e.camp ?? 0) > 0) camped = true;
+      seen = Math.max(seen, e.found?.length ?? 0);
+      // Nobody at home knows what they see until they are back.
+      if (s.expeditions.includes(e)) expect(s.stats.tilesExplored).toBe(known);
+    }
+    expect(s.expeditions.includes(e)).toBe(false);
+    expect(camped).toBe(true);
+    expect(seen).toBeGreaterThan(40);
+    if (e.people.length && s.settlers.some((p) => e.people.includes(p.id))) expect(s.stats.tilesExplored).toBeGreaterThanOrEqual(known + seen);
+  });
+
+  it('starve far from home when the provisions run out, and their charts are lost with them', () => {
+    const s = scouting(1, 2);
+    for (let k = 0; k < 10 && !s.expeditions.length; k++) tick(s, ctx());
+    const e = s.expeditions.find((x) => x.kind === 'scout')!;
+    for (let k = 0; k < 4; k++) tick(s, ctx());
+    // Held up for weeks, with nothing left to eat.
+    e.food = -1;
+    e.camp = 60;
+    const known = s.stats.tilesExplored;
+    const deaths = s.stats.deaths;
+    for (let k = 0; k < 60 && s.expeditions.includes(e); k++) tick(s, ctx());
+    expect(s.expeditions.includes(e)).toBe(false);
+    expect(s.stats.deaths - deaths).toBeGreaterThanOrEqual(2);
+    expect(s.log.some((l) => /never returned/.test(l.text))).toBe(true);
+    expect(s.stats.tilesExplored).toBe(known);
+  });
+
+  it('may break camp to settle prime land far from home, sending one of them back with the news', () => {
+    const s = readyRealm(1, 20);
+    s.council.build = true;
+    const home = s.towns[0];
+    // The settlement knows only its own surroundings, so pioneers have nowhere to go.
+    for (let i = 0; i < s.explored.length; i++) s.explored[i] = Math.hypot(tx(i) - home.x, ty(i) - home.y) <= 6 ? 1 : 0;
+    s.stats.tilesExplored = s.explored.reduce((a, b) => a + b, 0);
+    invalidate(s);
+    const values = siteValues(s.seed);
+    let site = -1;
+    for (let i = 0; i < s.explored.length; i++)
+      if (getMap(s.seed).island[i] === getMap(s.seed).island[getMap(s.seed).start] && values.at(i) >= 26 && Math.hypot(tx(i) - home.x, ty(i) - home.y) > 22 && Math.hypot(tx(i) - home.x, ty(i) - home.y) < 50 && siteFree(s, i) && (site < 0 || values.at(i) > values.at(site))) site = i;
+    expect(site).toBeGreaterThanOrEqual(0);
+    s.explored.fill(1);
+    invalidate(s);
+    const path = desirePath(s, home, { ...home, x: tx(site), y: ty(site) })!;
+    for (let i = 0; i < s.explored.length; i++) s.explored[i] = Math.hypot(tx(i) - home.x, ty(i) - home.y) <= 6 ? 1 : 0;
+    invalidate(s);
+    expect(path).toBeTruthy();
+    const party = s.settlers.filter((p) => p.town === home.id && p.job === null && p.born < s.day - 20 * DAYS_PER_YEAR).slice(0, 3);
+    for (const p of party) p.job = 'scout';
+    s.expeditions.push({ id: s.nextExpId++, kind: 'scout', from: home.id, path: [...path, ...path.slice(0, -1).reverse()], turn: path.length - 1, at: 0, step: 0, people: party.map((p) => p.id), started: s.day, food: 200, weary: 0, camp: 0, found: [] });
+    const known = s.stats.tilesExplored;
+    for (let k = 0; k < 200 && s.towns.length < 2; k++) tick(s, ctx());
+    expect(s.towns.length).toBe(2);
+    // On prime land along their way (perhaps before they reached the site they were making for).
+    const at = idx(s.towns[1].x, s.towns[1].y);
+    expect(path).toContain(at);
+    expect(values.at(at)).toBeGreaterThanOrEqual(26);
+    const runner = s.expeditions.find((e) => e.kind === 'scout')!;
+    expect(runner.messenger).toBe(true);
+    expect(runner.people.length).toBe(1);
+    const trails = s.trails.length;
+    for (let k = 0; k < 200 && s.expeditions.includes(runner); k++) tick(s, ctx());
+    expect(s.trails.length).toBeGreaterThan(trails);
+    expect(s.stats.tilesExplored).toBeGreaterThan(known);
   });
 });
 

@@ -20,6 +20,7 @@ import {
   terrainAt,
   tilesOf,
   wooded,
+  workArea,
 } from './land';
 import { ADULT_AGE, DAYS_PER_YEAR, ELDER_AGE } from './data';
 import { eraOf, hasTech } from './state';
@@ -165,7 +166,7 @@ export function census(state: GameState): Census {
 
 // ------------------------------------------------------------------ memo
 
-const memo = new WeakMap<GameState, { key: string; d: Derived }>();
+const memo = new WeakMap<GameState, { key: string; base: Derived; d: Derived }>();
 
 function structureKey(state: GameState) {
   let done = 0;
@@ -174,28 +175,38 @@ function structureKey(state: GameState) {
 }
 
 function keyOf(state: GameState) {
-  // Colonies staff their workplaces with their own people, so their headcount matters here.
+  return `${structureKey(state)}:${state.techs.length}:${state.claimed.length}:${state.landEpoch}:${state.routes.length}:${state.towns.map((t) => t.tier).join('')}:${Object.values(state.decisions).join()}`;
+}
+
+/** Colonies staff their workplaces with their own people, so their headcount matters to the job slots. */
+function staffKey(state: GameState) {
   let colonies = '';
   if (state.towns.length > 1) {
     const c = census(state);
-    for (let k = 1; k < state.towns.length; k++) colonies += `${c.adults.get(state.towns[k].id) ?? 0},${state.towns[k].tier};`;
+    for (let k = 1; k < state.towns.length; k++) colonies += `${c.adults.get(state.towns[k].id) ?? 0};`;
   }
-  return `${structureKey(state)}:${state.techs.length}:${state.claimed.length}:${state.landEpoch}:${state.routes.length}:${state.towns[0]?.tier}:${Object.values(state.decisions).join()}:${colonies}`;
+  return colonies;
 }
+
+const baseMemo = new WeakMap<GameState, { key: string; d: Derived }>();
 
 /** Values that only change when buildings, techs, discoveries or the settlements change. Memoised per state. */
 export function derived(state: GameState): Derived {
   const key = keyOf(state);
+  let b = baseMemo.get(state);
+  if (!b || b.key !== key) baseMemo.set(state, (b = { key, d: compute(state) }));
+  const sk = staffKey(state);
   const m = memo.get(state);
-  if (m && m.key === key) return m.d;
-  const d = compute(state);
-  memo.set(state, { key, d });
+  if (m && m.key === sk && m.base === b.d) return m.d;
+  const d = staff(state, b.d);
+  memo.set(state, { key: sk, base: b.d, d });
   return d;
 }
 
+/** Forget what was worked out (the flood fills, keyed by exactly what they depend on, are kept). */
 export function invalidate(state: GameState) {
   memo.delete(state);
-  structMemo.delete(state);
+  baseMemo.delete(state);
 }
 
 export function jobUnlocked(state: GameState, j: JobId) {
@@ -206,6 +217,8 @@ export function jobUnlocked(state: GameState, j: JobId) {
 interface Structure {
   reach: Uint8Array;
   network: Uint8Array;
+  /** The network's tiles, in order. */
+  netTiles: number[];
   roadable: Uint8Array;
   trail: Uint8Array;
   /** Network component of each tile, over roads only and over roads and trails. */
@@ -214,6 +227,20 @@ interface Structure {
 }
 
 const structMemo = new WeakMap<GameState, { key: string; s: Structure }>();
+
+/** Every tile of the network (roads, trails, greens, bridges and hearths), in order. */
+function networkTiles(state: GameState, network: Uint8Array): number[] {
+  const seen = new Set<number>();
+  const add = (i: number) => {
+    if (network[i]) seen.add(i);
+  };
+  for (const i of state.roads) add(i);
+  for (const i of state.trails) add(i);
+  for (const b of state.buildings) if (b.type === 'bridge' || b.type === 'campfire') add(idx(b.x, b.y));
+  for (const h of hearths(state))
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if (inBounds(h.x + dx, h.y + dy)) add(idx(h.x + dx, h.y + dy));
+  return [...seen].sort((a, b) => a - b);
+}
 
 /** The expensive flood fills: they only change when something is built or a road or trail is laid. */
 function structure(state: GameState): Structure {
@@ -224,22 +251,22 @@ function structure(state: GameState): Structure {
   const pass = passableMask(state);
   const reach = computeReach(state, pass);
   const network = networkMask(state);
+  const netTiles = networkTiles(state, network);
   const trail = new Uint8Array(n);
   for (const i of state.trails) trail[i] = 1;
-  const roadable = roadableFrom(state, network);
+  const roadable = roadableFrom(state, netTiles);
   const roadNet = new Uint8Array(n);
-  for (let i = 0; i < n; i++) if (network[i] && !trail[i]) roadNet[i] = 1;
-  const s: Structure = { reach, network, roadable, trail, roadComp: components(roadNet), fullComp: components(network) };
+  for (const i of netTiles) if (!trail[i]) roadNet[i] = 1;
+  const s: Structure = { reach, network, netTiles, roadable, trail, roadComp: components(roadNet, netTiles), fullComp: components(network, netTiles) };
   structMemo.set(state, { key, s });
   return s;
 }
 
-/** Label the connected patches of a mask (N4); -1 outside it. */
-function components(mask: Uint8Array): Int32Array {
-  const n = mask.length;
-  const comp = new Int32Array(n).fill(-1);
+/** Label the connected patches of a mask (N4); -1 outside it. `tiles` lists every tile of the mask, in order. */
+function components(mask: Uint8Array, tiles: number[]): Int32Array {
+  const comp = new Int32Array(mask.length).fill(-1);
   let id = 0;
-  for (let i0 = 0; i0 < n; i0++) {
+  for (const i0 of tiles) {
     if (!mask[i0] || comp[i0] >= 0) continue;
     const q = [i0];
     comp[i0] = id;
@@ -274,109 +301,17 @@ export function housingOf(state: GameState, b: Building) {
   return BUILDING_DEFS[b.type].housing ?? 0;
 }
 
-function compute(state: GameState): Derived {
-  const n = MAP_W * MAP_H;
+/**
+ * Job slots: workplaces in a colony are staffed by its own people. Worked out apart from the rest, as
+ * it changes with every colony's headcount while the rest only changes with the land and buildings.
+ */
+function staff(state: GameState, base: Derived): Derived {
   const capitalId = state.towns[0]?.id ?? 1;
-  const territory = new Uint8Array(n);
-  const townAt = new Int32Array(n);
-  let housing = 0;
-  let stoneHousing = 0;
-  const caps = Object.fromEntries(RESOURCES.map((r) => [r, RESOURCE_DEFS[r].baseCap])) as Resources;
-  const slotGroups = Object.fromEntries(JOBS.map((j) => [j, [] as SlotGroup[]])) as Record<JobId, SlotGroup[]>;
-  const counts: Partial<Record<BuildingId, number>> = {};
-  const sites: Building[] = [];
-  const occupied = new Uint8Array(n);
-  const siteMask = new Uint8Array(n);
-  const buildingAt = new Int32Array(n);
-  const replant = new Uint8Array(n);
-  const catchments = { wood: new Map(), stone: new Map(), ore: new Map(), life: new Map() } as Derived['catchments'];
-  const spent = new Set<number>();
-  const map = getMap(state.seed);
-  const st = structure(state);
-  const { network, trail } = st;
-  for (let i = 0; i < n; i++) if (network[i]) occupied[i] = 1;
-
   const towns = new Map<number, TownInfo>();
-  for (const t of state.towns) {
-    const hi = idx(t.x, t.y);
-    towns.set(t.id, { housing: 0, buildings: 0, counts: {}, slots: 0, fullSlots: 0, link: 'none', haul: HAUL.none, specialty: null, biome: map.biome[hi] as Biome, island: map.island[hi] });
-  }
+  for (const [id, info] of base.towns) towns.set(id, { ...info, slots: 0, fullSlots: 0 });
   const townOf = (b: Building) => (towns.has(b.town ?? capitalId) ? (b.town ?? capitalId) : capitalId);
-
-  for (const b of state.buildings) {
-    const tiles = tilesOf(b);
-    for (const at of tiles) {
-      occupied[at] = 1;
-      buildingAt[at] = b.id;
-      if (!b.done) siteMask[at] = 1;
-    }
-    if (!b.done) {
-      sites.push(b);
-      continue;
-    }
-    const def = BUILDING_DEFS[b.type];
-    counts[b.type] = (counts[b.type] ?? 0) + 1;
-    const town = towns.get(townOf(b))!;
-    if (b.type !== 'campfire' && b.type !== 'bridge') {
-      town.buildings++;
-      town.counts[b.type] = (town.counts[b.type] ?? 0) + 1;
-    }
-    for (const layer of ['wood', 'stone', 'ore', 'life'] as LandLayer[]) {
-      const ct = catchmentAt(state, b.type, b.x, b.y, layer);
-      if (ct.length) catchments[layer].set(b.id, ct);
-    }
-    if (b.type === 'lumber') for (const i of catchments.wood.get(b.id) ?? []) replant[i] = 1;
-    if ((b.type === 'quarry' && layerSum(state, 'stone', catchments.stone.get(b.id) ?? []) < 0.5) || (b.type === 'mine' && layerSum(state, 'ore', catchments.ore.get(b.id) ?? []) < 0.5)) spent.add(b.id);
-    const r = b.type === 'campfire' ? hearthRadius(state, b.town) : def.territory;
-    const [cx, cy] = centerOf(b);
-    const [w, h] = sizeOf(b.type);
-    const R = Math.ceil(r + Math.max(w, h));
-    for (let y = Math.floor(cy) - R; y <= Math.ceil(cy) + R; y++)
-      for (let x = Math.floor(cx) - R; x <= Math.ceil(cx) + R; x++) {
-        if (!inBounds(x, y)) continue;
-        if (Math.hypot(x - cx, y - cy) <= r + 0.5 + (Math.max(w, h) - 1) / 2) territory[idx(x, y)] = 1;
-      }
-    const hs = housingOf(state, b);
-    housing += hs;
-    town.housing += hs;
-    if (b.type === 'house' || b.type === 'manor') stoneHousing += hs;
-    for (const [res, amt] of Object.entries(def.storage ?? {})) caps[res as ResourceId] += amt!;
-  }
-
-  // --- how each settlement is linked to the capital
-  const ids = state.towns.map((t) => t.id);
-  const parent = new Map<number, number>(ids.map((i) => [i, i]));
-  const find = (a: number): number => {
-    while (parent.get(a) !== a) a = parent.get(a)!;
-    return a;
-  };
-  const union = (a: number, b: number) => parent.set(find(a), find(b));
-  const hcomp = (comp: Int32Array, t: { x: number; y: number }) => comp[idx(t.x, t.y)];
-  for (const a of state.towns)
-    for (const b of state.towns) if (a.id < b.id && hcomp(st.roadComp, a) >= 0 && hcomp(st.roadComp, a) === hcomp(st.roadComp, b)) union(a.id, b.id);
-  const roadRoot = new Map(ids.map((i) => [i, find(i)]));
-  for (const r of state.routes) if (towns.has(r.a) && towns.has(r.b)) union(r.a, r.b);
-  const routeRoot = new Map(ids.map((i) => [i, find(i)]));
-  for (const a of state.towns)
-    for (const b of state.towns) if (a.id < b.id && hcomp(st.fullComp, a) >= 0 && hcomp(st.fullComp, a) === hcomp(st.fullComp, b)) union(a.id, b.id);
-  for (const t of state.towns) {
-    const info = towns.get(t.id)!;
-    info.link =
-      t.id === capitalId ? 'capital' : roadRoot.get(t.id) === roadRoot.get(capitalId) ? 'road' : routeRoot.get(t.id) === routeRoot.get(capitalId) ? 'route' : find(t.id) === find(capitalId) ? 'trail' : 'none';
-    info.haul = HAUL[info.link];
-    let best: Specialty | null = null;
-    let bestV = 1.5;
-    const tally: Partial<Record<Specialty, number>> = {};
-    for (const [type, k] of Object.entries(info.counts)) {
-      const sp = SPECIALTY_OF[type as BuildingId];
-      if (!sp) continue;
-      tally[sp[0]] = (tally[sp[0]] ?? 0) + k! * sp[1];
-    }
-    for (const [sp, v] of Object.entries(tally)) if (v! > bestV) (bestV = v!), (best = sp as Specialty);
-    info.specialty = best;
-  }
-
-  // --- job slots: workplaces in a colony are staffed by its own people
+  const spent = base.spent;
+  const slotGroups = Object.fromEntries(JOBS.map((j) => [j, [] as SlotGroup[]])) as Record<JobId, SlotGroup[]>;
   const c = state.towns.length > 1 ? census(state) : null;
   const raw: Map<number, { j: JobId; g: SlotGroup }[]> = new Map();
   for (const b of state.buildings) {
@@ -429,11 +364,6 @@ function compute(state: GameState): Derived {
     for (const e of list) if (e.g.count > 0) slotGroups[e.j].push({ mult: e.g.mult, count: e.g.count, building: e.g.building, town: e.g.town });
   }
 
-  // Decision effects on storage.
-  const store = fxMul(state, 'storage');
-  for (const r of RESOURCES) if (isFinite(caps[r])) caps[r] = Math.round(caps[r] * store);
-  caps.food = Math.round(caps.food * fxMul(state, 'foodStore'));
-
   const slots = {} as Record<JobId, number>;
   for (const j of JOBS) {
     slotGroups[j].sort((a, b) => b.mult - a.mult);
@@ -442,18 +372,155 @@ function compute(state: GameState): Derived {
   slots.gatherer = Infinity;
   slots.builder = Infinity;
   for (const j of JOBS) if (!jobUnlocked(state, j)) slots[j] = 0;
+  return { ...base, towns, slotGroups, slots };
+}
+
+const shapes = new Map<string, [number, number][]>();
+
+/** The tiles a building of this footprint holds as territory, as offsets from its top-left corner. */
+function territoryShape(w: number, h: number, r: number): [number, number][] {
+  const key = `${w},${h},${r}`;
+  let out = shapes.get(key);
+  if (out) return out;
+  out = [];
+  const cx = (w - 1) / 2;
+  const cy = (h - 1) / 2;
+  const R = Math.ceil(r + Math.max(w, h));
+  for (let y = Math.floor(cy) - R; y <= Math.ceil(cy) + R; y++)
+    for (let x = Math.floor(cx) - R; x <= Math.ceil(cx) + R; x++) if (Math.hypot(x - cx, y - cy) <= r + 0.5 + (Math.max(w, h) - 1) / 2) out.push([x, y]);
+  shapes.set(key, out);
+  return out;
+}
+
+function compute(state: GameState): Derived {
+  const n = MAP_W * MAP_H;
+  const capitalId = state.towns[0]?.id ?? 1;
+  const territory = new Uint8Array(n);
+  const townAt = new Int32Array(n);
+  let housing = 0;
+  let stoneHousing = 0;
+  const caps = Object.fromEntries(RESOURCES.map((r) => [r, RESOURCE_DEFS[r].baseCap])) as Resources;
+  const slotGroups = Object.fromEntries(JOBS.map((j) => [j, [] as SlotGroup[]])) as Record<JobId, SlotGroup[]>;
+  const counts: Partial<Record<BuildingId, number>> = {};
+  const sites: Building[] = [];
+  const occupied = new Uint8Array(n);
+  const siteMask = new Uint8Array(n);
+  const buildingAt = new Int32Array(n);
+  const replant = new Uint8Array(n);
+  let terrTiles: number[] = [];
+  const catchments = { wood: new Map(), stone: new Map(), ore: new Map(), life: new Map() } as Derived['catchments'];
+  const spent = new Set<number>();
+  const map = getMap(state.seed);
+  const st = structure(state);
+  const { trail } = st;
+  for (const i of st.netTiles) occupied[i] = 1;
+
+  const towns = new Map<number, TownInfo>();
+  for (const t of state.towns) {
+    const hi = idx(t.x, t.y);
+    towns.set(t.id, { housing: 0, buildings: 0, counts: {}, slots: 0, fullSlots: 0, link: 'none', haul: HAUL.none, specialty: null, biome: map.biome[hi] as Biome, island: map.island[hi] });
+  }
+  const townOf = (b: Building) => (towns.has(b.town ?? capitalId) ? (b.town ?? capitalId) : capitalId);
+
+  for (const b of state.buildings) {
+    const tiles = tilesOf(b);
+    for (const at of tiles) {
+      occupied[at] = 1;
+      buildingAt[at] = b.id;
+      if (!b.done) siteMask[at] = 1;
+    }
+    if (!b.done) {
+      sites.push(b);
+      continue;
+    }
+    const def = BUILDING_DEFS[b.type];
+    counts[b.type] = (counts[b.type] ?? 0) + 1;
+    const town = towns.get(townOf(b))!;
+    if (b.type !== 'campfire' && b.type !== 'bridge') {
+      town.buildings++;
+      town.counts[b.type] = (town.counts[b.type] ?? 0) + 1;
+    }
+    for (const layer of ['wood', 'stone', 'ore', 'life'] as LandLayer[]) {
+      const ct = catchmentAt(state, b.type, b.x, b.y, layer);
+      if (ct.length) catchments[layer].set(b.id, ct);
+    }
+
+    if (b.type === 'lumber') for (const i of catchments.wood.get(b.id) ?? []) replant[i] = 1;
+    if ((b.type === 'quarry' && layerSum(state, 'stone', catchments.stone.get(b.id) ?? []) < 0.5) || (b.type === 'mine' && layerSum(state, 'ore', catchments.ore.get(b.id) ?? []) < 0.5)) spent.add(b.id);
+    const r = b.type === 'campfire' ? hearthRadius(state, b.town) : def.territory;
+    const [w, h] = sizeOf(b.type);
+    for (const [dx, dy] of territoryShape(w, h, r)) {
+      const x = b.x + dx;
+      const y = b.y + dy;
+      if (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H) continue;
+      const i = y * MAP_W + x;
+      if (territory[i]) continue;
+      territory[i] = 1;
+      terrTiles.push(i);
+    }
+    const hs = housingOf(state, b);
+    housing += hs;
+    town.housing += hs;
+    if (b.type === 'house' || b.type === 'manor') stoneHousing += hs;
+    for (const [res, amt] of Object.entries(def.storage ?? {})) caps[res as ResourceId] += amt!;
+  }
+
+  // --- how each settlement is linked to the capital
+  const ids = state.towns.map((t) => t.id);
+  const parent = new Map<number, number>(ids.map((i) => [i, i]));
+  const find = (a: number): number => {
+    while (parent.get(a) !== a) a = parent.get(a)!;
+    return a;
+  };
+  const union = (a: number, b: number) => parent.set(find(a), find(b));
+  const hcomp = (comp: Int32Array, t: { x: number; y: number }) => comp[idx(t.x, t.y)];
+  for (const a of state.towns)
+    for (const b of state.towns) if (a.id < b.id && hcomp(st.roadComp, a) >= 0 && hcomp(st.roadComp, a) === hcomp(st.roadComp, b)) union(a.id, b.id);
+  const roadRoot = new Map(ids.map((i) => [i, find(i)]));
+  for (const r of state.routes) if (towns.has(r.a) && towns.has(r.b)) union(r.a, r.b);
+  const routeRoot = new Map(ids.map((i) => [i, find(i)]));
+  for (const a of state.towns)
+    for (const b of state.towns) if (a.id < b.id && hcomp(st.fullComp, a) >= 0 && hcomp(st.fullComp, a) === hcomp(st.fullComp, b)) union(a.id, b.id);
+  for (const t of state.towns) {
+    const info = towns.get(t.id)!;
+    info.link =
+      t.id === capitalId ? 'capital' : roadRoot.get(t.id) === roadRoot.get(capitalId) ? 'road' : routeRoot.get(t.id) === routeRoot.get(capitalId) ? 'route' : find(t.id) === find(capitalId) ? 'trail' : 'none';
+    info.haul = HAUL[info.link];
+    let best: Specialty | null = null;
+    let bestV = 1.5;
+    const tally: Partial<Record<Specialty, number>> = {};
+    for (const [type, k] of Object.entries(info.counts)) {
+      const sp = SPECIALTY_OF[type as BuildingId];
+      if (!sp) continue;
+      tally[sp[0]] = (tally[sp[0]] ?? 0) + k! * sp[1];
+    }
+    for (const [sp, v] of Object.entries(tally)) if (v! > bestV) (bestV = v!), (best = sp as Specialty);
+    info.specialty = best;
+  }
+
+  // Decision effects on storage.
+  const store = fxMul(state, 'storage');
+  for (const r of RESOURCES) if (isFinite(caps[r])) caps[r] = Math.round(caps[r] * store);
+  caps.food = Math.round(caps.food * fxMul(state, 'foodStore'));
+
+  const slots = {} as Record<JobId, number>;
 
   // Each territory tile belongs to the nearest hearth.
   const hs = hearths(state);
-  const terrTiles: number[] = [];
-  for (let i = 0; i < n; i++) {
-    if (!territory[i]) continue;
-    terrTiles.push(i);
+  terrTiles = Array.from(Int32Array.from(terrTiles).sort());
+  const hx = Int32Array.from(hs, (h) => h.x);
+  const hy = Int32Array.from(hs, (h) => h.y);
+  const ht = Int32Array.from(hs, (h) => h.town ?? capitalId);
+  for (const i of terrTiles) {
+    const x = i % MAP_W;
+    const y = (i - x) / MAP_W;
     let best = capitalId;
     let bd = Infinity;
-    for (const h of hs) {
-      const dd = (tx(i) - h.x) ** 2 + (ty(i) - h.y) ** 2;
-      if (dd < bd) (bd = dd), (best = h.town ?? capitalId);
+    for (let k = 0; k < hx.length; k++) {
+      const dx = x - hx[k];
+      const dy = y - hy[k];
+      const dd = dx * dx + dy * dy;
+      if (dd < bd) (bd = dd), (best = ht[k]);
     }
     townAt[i] = best;
   }
@@ -474,7 +541,7 @@ function compute(state: GameState): Derived {
     occupied,
     siteMask,
     buildingAt,
-    network,
+    network: st.network,
     trail,
     roadable: st.roadable,
     replant,
@@ -484,13 +551,14 @@ function compute(state: GameState): Derived {
 }
 
 /** Flood out from the network over ground a road may cross (not buildings, water, rock or sacred sites). */
-function roadableFrom(state: GameState, network: Uint8Array): Uint8Array {
+function roadableFrom(state: GameState, netTiles: number[]): Uint8Array {
   const map = getMap(state.seed);
   const n = MAP_W * MAP_H;
   const taken = takenMask(state);
+  const area = workArea(state);
   const out = new Uint8Array(n);
   const queue: number[] = [];
-  for (let i = 0; i < n; i++) if (network[i] && !taken[i]) (out[i] = 1), queue.push(i);
+  for (const i of netTiles) if (!taken[i]) (out[i] = 1), queue.push(i);
   for (let q = 0; q < queue.length; q++) {
     const i = queue[q];
     const x = tx(i);
@@ -498,7 +566,7 @@ function roadableFrom(state: GameState, network: Uint8Array): Uint8Array {
     for (const [dx, dy] of N4) {
       if (!inBounds(x + dx, y + dy)) continue;
       const j = idx(x + dx, y + dy);
-      if (out[j] || taken[j] || blocked(map, j) || map.feature[j] === F.Ruins || map.feature[j] === F.Grove) continue;
+      if (out[j] || taken[j] || !area[j] || blocked(map, j) || map.feature[j] === F.Ruins || map.feature[j] === F.Grove) continue;
       out[j] = 1;
       queue.push(j);
     }

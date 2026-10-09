@@ -7,7 +7,6 @@
 import {
   BIOMES,
   BUILDING_DEFS,
-  CARAVAN_COST,
   DAYS_PER_YEAR,
   ERAS,
   GALLEY_COST,
@@ -17,8 +16,12 @@ import {
   PAVE_WORK,
   PIONEER_SUPPLIES,
   PIONEERS,
+  SCOUT_DAYS,
   TIERS,
   TOWN_SPACING,
+  TRAFFIC_PAVE,
+  TRAFFIC_ROUTE,
+  TRAFFIC_TRAIL,
 } from './data';
 import { census, canAfford, derived, invalidate, pay, recount, SPECIALTY_NAMES, type Derived } from './derived';
 import { choiceOf, fxMul } from './decisions';
@@ -94,6 +97,13 @@ function updateTiers(state: GameState, ctx: Ctx) {
 
 // ------------------------------------------------------------------ people on the move
 
+/** People out in the wilds with a scouting party (they still belong to their settlement). */
+export function inParty(state: GameState): Set<number> {
+  const out = new Set<number>();
+  for (const e of state.expeditions) if (e.kind === 'scout') for (const id of e.people) out.add(id);
+  return out;
+}
+
 /** Settlements people can move between: both joined to the capital by trail, road or trade route, or directly by a route. */
 function linked(state: GameState, a: number, b: number, d: Derived) {
   if (hasRoute(state, a, b)) return true;
@@ -113,6 +123,7 @@ function migrate(state: GameState) {
   const free = (id: number) => (d.towns.get(id)?.housing ?? 0) - (census(state).residents.get(id) ?? 0);
   const short = (id: number) => (d.towns.get(id)?.fullSlots ?? 0) - (census(state).adults.get(id) ?? 0);
   let moved = 0;
+  const away = inParty(state);
   for (const to of state.towns) {
     if (free(to.id) <= 0) continue;
     const pull = short(to.id) > 0 ? 2 : 0;
@@ -128,7 +139,7 @@ function migrate(state: GameState) {
     }
     if (!from) continue;
     const n = Math.min(free(to.id), best > 4 ? 2 : 1);
-    const movers = state.settlers.filter((s) => s.town === from!.id && isAdult(state, s)).slice(-n);
+    const movers = state.settlers.filter((s) => s.town === from!.id && isAdult(state, s) && !away.has(s.id)).slice(-n);
     for (const m of movers) {
       m.town = to.id;
       moved++;
@@ -167,7 +178,7 @@ export interface SiteProfile {
   coast: boolean;
 }
 
-const valueCache = new Map<number, Float32Array>();
+const valueCache = new Map<number, SiteValues>();
 
 /** Fresh water within a few tiles: rivers and lakes (not the salt sea). */
 function freshWaterNear(seed: number, i: number, r = 3) {
@@ -220,29 +231,41 @@ export function siteProfile(seed: number, i: number): SiteProfile {
   return p;
 }
 
+/** How good each place would be for a new settlement's hearth (0 where one cannot stand), worked out as asked for. */
+export class SiteValues {
+  private v: Float32Array;
+  constructor(private seed: number) {
+    this.v = new Float32Array(MAP_W * MAP_H).fill(-1);
+  }
+  at(i: number): number {
+    const v = this.v[i];
+    return v >= 0 ? v : (this.v[i] = siteValueAt(this.seed, i));
+  }
+}
+
+function siteValueAt(seed: number, i: number): number {
+  const map = getMap(seed);
+  const t = map.terrain[i];
+  if (t !== T.Grass && t !== T.Meadow && t !== T.Sand && t !== T.Forest) return 0;
+  if (map.feature[i]) return 0;
+  const x = tx(i);
+  const y = ty(i);
+  if (x < 3 || y < 3 || x > MAP_W - 4 || y > MAP_H - 4) return 0;
+  // Room for a green: most of the ring must be walkable land.
+  let ok = 0;
+  for (const [dx, dy] of N8) {
+    const tt = map.terrain[idx(x + dx, y + dy)];
+    if (!isWater(tt) && tt !== T.Mountain && tt !== T.Peak) ok++;
+  }
+  if (ok < 6) return 0;
+  return profileValue(siteProfile(seed, i));
+}
+
 /** How good a place is for a new settlement's hearth, from what is around it (0 where one cannot stand). */
-export function siteValues(seed: number): Float32Array {
+export function siteValues(seed: number): SiteValues {
   let v = valueCache.get(seed);
   if (v) return v;
-  const map = getMap(seed);
-  const n = MAP_W * MAP_H;
-  v = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const t = map.terrain[i];
-    if (t !== T.Grass && t !== T.Meadow && t !== T.Sand && t !== T.Forest) continue;
-    if (map.feature[i]) continue;
-    const x = tx(i);
-    const y = ty(i);
-    if (x < 3 || y < 3 || x > MAP_W - 4 || y > MAP_H - 4) continue;
-    // Room for a green: most of the ring must be walkable land.
-    let ok = 0;
-    for (const [dx, dy] of N8) {
-      const tt = map.terrain[idx(x + dx, y + dy)];
-      if (!isWater(tt) && tt !== T.Mountain && tt !== T.Peak) ok++;
-    }
-    if (ok < 6) continue;
-    v[i] = profileValue(siteProfile(seed, i));
-  }
+  v = new SiteValues(seed);
   if (valueCache.size >= 4) valueCache.delete(valueCache.keys().next().value!);
   valueCache.set(seed, v);
   return v;
@@ -356,8 +379,8 @@ export function findSites(state: GameState, fromTown: number, opts: { sea?: bool
     const di = dist[i];
     if (di > maxCost) break;
     const onSea = isWater(map.terrain[i]) && map.ocean[i];
-    if (!onSea && values[i] > 0 && state.explored[i] && !d.occupied[i] && !d.territory[i] && spacing(i) && claimed.every((c) => Math.hypot(tx(c) - tx(i), ty(c) - ty(i)) >= TOWN_SPACING)) {
-      let v = values[i];
+    if (!onSea && state.explored[i] && values.at(i) > 0 && state.explored[i] && !d.occupied[i] && !d.territory[i] && spacing(i) && claimed.every((c) => Math.hypot(tx(c) - tx(i), ty(c) - ty(i)) >= TOWN_SPACING)) {
+      let v = values.at(i);
       if (!biomesHeld.has(map.biome[i])) v += 5;
       if (map.island[i] !== map.island[start]) v += 3;
       out.push({ tile: i, path: [], cost: di, value: v, score: v - di * 0.09, sea: false });
@@ -448,7 +471,8 @@ export function pioneerStatus(state: GameState, fromTown: number, sea = false): 
 
 /** Who can go: adults in their prime, youngest first. */
 function ablePioneers(state: GameState, fromTown: number) {
-  const able = state.settlers.filter((s) => s.town === fromTown && isAdult(state, s) && ageOf(state, s) < 40);
+  const away = inParty(state);
+  const able = state.settlers.filter((s) => s.town === fromTown && isAdult(state, s) && ageOf(state, s) < 40 && !away.has(s.id));
   able.sort((a, b) => ageOf(state, a) - ageOf(state, b) || a.id - b.id);
   return able;
 }
@@ -456,13 +480,13 @@ function ablePioneers(state: GameState, fromTown: number) {
 /** Whether a tile can still take a new hearth: free, outside every territory and far enough from other settlements. */
 export function siteFree(state: GameState, tile: number, exceptExpedition?: number) {
   const d = derived(state);
-  if ((d.occupied[tile] && !d.trail[tile]) || d.territory[tile] || siteValues(state.seed)[tile] <= 0) return false;
+  if ((d.occupied[tile] && !d.trail[tile]) || d.territory[tile] || siteValues(state.seed).at(tile) <= 0) return false;
   if (!state.towns.every((t) => Math.hypot(t.x - tx(tile), t.y - ty(tile)) >= TOWN_SPACING)) return false;
   return state.expeditions.every((e) => e.id === exceptExpedition || e.kind !== 'settle' || Math.hypot(tx(e.path[e.path.length - 1]) - tx(tile), ty(e.path[e.path.length - 1]) - ty(tile)) >= TOWN_SPACING);
 }
 
 export function pioneerCount(state: GameState) {
-  return PIONEERS + (choiceOf(state, 'expansion') === 'expand' ? 2 : 0);
+  return PIONEERS + (choiceOf(state, 'expansion') === 'expand' ? 4 : 0);
 }
 
 export function expeditionCost(_state: GameState, sea: boolean): Cost {
@@ -505,7 +529,6 @@ export function autoPioneers(state: GameState, ctx: Ctx, fromTown: number, minVa
 
 /** Light a new hearth: the pioneers become its first people. */
 function foundSettlement(state: GameState, ctx: Ctx, e: Expedition, rng: Rng) {
-  const map = getMap(state.seed);
   let tile = e.path[e.path.length - 1];
   if (!siteFree(state, tile, e.id)) {
     // Someone settled here first: look for free land close by, or go home.
@@ -528,10 +551,19 @@ function foundSettlement(state: GameState, ctx: Ctx, e: Expedition, rng: Rng) {
     }
     tile = best;
   }
+  const town = lightHearth(state, ctx, tile, e.people, e.from, rng);
+  const map = getMap(state.seed);
+  const biome = BIOMES[map.biome[tile] as Biome].name.toLowerCase();
+  const island = map.island[tile] !== map.island[idx(state.towns[0].x, state.towns[0].y)];
+  note(state, `The pioneers light a hearth and name their ${biome} home ${town.name}${island ? ', a colony across the sea' : ''}.`, 'realm');
+}
+
+/** A new settlement on a free tile, with these people as its first. */
+export function lightHearth(state: GameState, ctx: Ctx, tile: number, people: number[], from: number, rng: Rng): Settlement {
   const used = new Set(state.towns.map((t) => t.name));
   let name = placeName(rng);
   for (let k = 0; k < 20 && used.has(name); k++) name = placeName(rng);
-  const town: Settlement = { id: state.nextTownId++, name, x: tx(tile), y: ty(tile), founded: state.day, tier: 0, parent: e.from };
+  const town: Settlement = { id: state.nextTownId++, name, x: tx(tile), y: ty(tile), founded: state.day, tier: 0, parent: from };
   state.towns.push(town);
   // The founders clear a green around their fire.
   for (let dy = -1; dy <= 1; dy++)
@@ -544,14 +576,16 @@ function foundSettlement(state: GameState, ctx: Ctx, e: Expedition, rng: Rng) {
     }
   state.trails = state.trails.filter((i) => Math.max(Math.abs(tx(i) - town.x), Math.abs(ty(i) - town.y)) > 1);
   state.buildings.push({ id: state.nextBuildingId++, type: 'campfire', x: town.x, y: town.y, progress: 0, done: true, town: town.id });
-  for (const s of state.settlers) if (e.people.includes(s.id)) s.town = town.id;
+  for (const s of state.settlers)
+    if (people.includes(s.id)) {
+      s.town = town.id;
+      s.job = null;
+    }
   recount(state);
   reveal(state, ctx, town.x, town.y, 6);
   invalidate(state);
   ctx.fx.push({ kind: 'found', town: town.id });
-  const biome = BIOMES[map.biome[tile] as Biome].name.toLowerCase();
-  const island = map.island[tile] !== map.island[idx(state.towns[0].x, state.towns[0].y)];
-  note(state, `The pioneers light a hearth and name their ${biome} home ${name}${island ? ', a colony across the sea' : ''}.`, 'realm');
+  return town;
 }
 
 // ------------------------------------------------------------------ voyages
@@ -626,6 +660,17 @@ function reveal(state: GameState, ctx: Ctx, x: number, y: number, r: number) {
     }
 }
 
+/** Land brought home on a scout's charts becomes known to the realm, discoveries and all. Returns how much was new. */
+export function chart(state: GameState, ctx: Ctx, tiles: number[]) {
+  let n = 0;
+  for (const i of tiles)
+    if (!state.explored[i]) {
+      revealHook(state, ctx, i);
+      n++;
+    }
+  return n;
+}
+
 /** Set by the simulation so expeditions reveal tiles (and their discoveries) the same way scouts do. */
 let revealHook: (state: GameState, ctx: Ctx, i: number) => void = (state, _ctx, i) => {
   state.explored[i] = 1;
@@ -641,6 +686,7 @@ function stepExpeditions(state: GameState, ctx: Ctx, rng: Rng) {
   const map = getMap(state.seed);
   const done: Expedition[] = [];
   for (const e of state.expeditions) {
+    if (e.kind === 'scout') continue; // scouting parties keep their own pace (scouting.ts)
     e.step += e.kind === 'voyage' ? 1.3 : 1;
     const trail: number[] = [];
     while (e.at < e.path.length - 1) {
@@ -665,7 +711,7 @@ function stepExpeditions(state: GameState, ctx: Ctx, rng: Rng) {
   if (done.length) invalidate(state);
 }
 
-/** A pioneer died on the road. If none are left, the expedition is lost. */
+/** A pioneer or scout died away from home. If none are left, the expedition is lost. */
 export function loseTraveller(state: GameState, id: number) {
   for (const e of state.expeditions) {
     const k = e.people.indexOf(id);
@@ -673,7 +719,8 @@ export function loseTraveller(state: GameState, id: number) {
     e.people.splice(k, 1);
     if (!e.people.length) {
       state.expeditions.splice(state.expeditions.indexOf(e), 1);
-      note(state, 'The last of the pioneers has died on the road. Their trail fades into the wilds.', 'bad');
+      if (e.kind === 'scout') note(state, `The scouting party from ${townById(state, e.from)?.name ?? 'home'} never returned. What they saw is lost with them.`, 'bad');
+      else note(state, 'The last of the pioneers has died on the road. Their trail fades into the wilds.', 'bad');
     }
     return;
   }
@@ -693,36 +740,6 @@ export interface RouteOption {
 
 function hasRoute(state: GameState, a: number, b: number) {
   return state.routes.some((r) => (r.a === a && r.b === b) || (r.a === b && r.b === a));
-}
-
-/** The way between two hearths along roads and trails, or null if they are not joined by land. */
-function networkPath(a: Settlement, b: Settlement, d: Derived): number[] | null {
-  const n = MAP_W * MAP_H;
-  const prev = new Int32Array(n).fill(-1);
-  const seen = new Uint8Array(n);
-  const s = idx(a.x, a.y);
-  const goal = idx(b.x, b.y);
-  const q = [s];
-  seen[s] = 1;
-  for (let k = 0; k < q.length; k++) {
-    const i = q[k];
-    if (i === goal) {
-      const path: number[] = [];
-      for (let p = goal; p >= 0; p = prev[p]) path.push(p);
-      return path.reverse();
-    }
-    for (const [dx, dy] of N4) {
-      const x = tx(i) + dx;
-      const y = ty(i) + dy;
-      if (!inBounds(x, y)) continue;
-      const j = idx(x, y);
-      if (seen[j] || !d.network[j]) continue;
-      seen[j] = 1;
-      prev[j] = i;
-      q.push(j);
-    }
-  }
-  return null;
 }
 
 /** The sea lane between two settlements' harbours, or null. */
@@ -769,26 +786,22 @@ function seaPath(state: GameState, a: number, b: number): number[] | null {
   return null;
 }
 
-/** Every pair of settlements a trade route could join, and whether it can be opened now. */
+/** Every pair of settlements a sea trade route could join, and whether it can be opened now. (Land routes grow by themselves: see `growTraffic`.) */
 export function routeOptions(state: GameState): RouteOption[] {
-  const d = derived(state);
   const out: RouteOption[] = [];
   for (let i = 0; i < state.towns.length; i++)
     for (let j = i + 1; j < state.towns.length; j++) {
       const a = state.towns[i];
       const b = state.towns[j];
       if (hasRoute(state, a.id, b.id)) continue;
-      const land = networkPath(a, b, d);
-      const kind: 'land' | 'sea' = land ? 'land' : 'sea';
-      const path = land ?? seaPath(state, a.id, b.id);
-      const cost = kind === 'land' ? CARAVAN_COST : GALLEY_COST;
+      const path = seaPath(state, a.id, b.id);
+      const cost = GALLEY_COST;
       let reason: string | undefined;
-      if (!path) reason = 'Not joined by trail, road or sea lane (sea routes need a harbour at both ends)';
-      else if (kind === 'land' && !hasTech(state, 'the_wheel')) reason = 'Requires The Wheel';
-      else if (kind === 'sea' && !hasTech(state, 'seafaring')) reason = 'Requires Seafaring';
+      if (!path) reason = 'Sea routes need a harbour at both ends, on the same sea';
+      else if (!hasTech(state, 'seafaring')) reason = 'Requires Seafaring';
       else if (a.tier < 1 || b.tier < 1) reason = 'Both must be at least villages';
       else if (!canAfford(state, cost)) reason = 'Not enough resources';
-      out.push({ a: a.id, b: b.id, kind, path: path ?? [], cost, ok: !reason, reason });
+      out.push({ a: a.id, b: b.id, kind: 'sea', path: path ?? [], cost, ok: !reason, reason });
     }
   return out;
 }
@@ -804,7 +817,7 @@ export function openRoute(state: GameState, ctx: Ctx, a: number, b: number): Rea
   ctx.fx.push({ kind: 'route', route: r.id });
   const A = townById(state, opt.a)!;
   const B = townById(state, opt.b)!;
-  note(state, opt.kind === 'land' ? `Carts begin to run between ${A.name} and ${B.name}. Builders will pave the trail into a road.` : `A galley now sails the sea lane between ${A.name} and ${B.name}.`, 'realm');
+  note(state, `A galley now sails the sea lane between ${A.name} and ${B.name}.`, 'realm');
   return { ok: true };
 }
 
@@ -829,11 +842,11 @@ export function tradeMorale(state: GameState) {
   return Math.min(8, state.routes.length * 2);
 }
 
-/** Builders pave land routes once the sites are seen to: trail tile by trail tile, one stone each. Returns work used. */
+/** Builders pave busy land routes once the sites are seen to: trail tile by trail tile, one stone each. Returns work used. */
 export function paveRoutes(state: GameState, work: number, rates?: Rates): number {
   let left = work;
   for (const r of state.routes) {
-    if (r.kind !== 'land' || left <= 0) continue;
+    if (r.kind !== 'land' || left <= 0 || !busy(state, r)) continue;
     const trails = new Set(state.trails);
     while (left > 0 && r.paved < r.path.length) {
       const i = r.path[r.paved];
@@ -856,12 +869,168 @@ export function paveRoutes(state: GameState, work: number, rates?: Rates): numbe
   return work - left;
 }
 
-/** Trail tiles of land routes still waiting to be paved. */
+/** Trail tiles of busy land routes still waiting to be paved. */
 export function unpaved(state: GameState) {
   const trails = new Set(state.trails);
   let n = 0;
-  for (const r of state.routes) if (r.kind === 'land') for (let k = r.paved; k < r.path.length; k++) if (trails.has(r.path[k])) n++;
+  for (const r of state.routes) if (r.kind === 'land' && busy(state, r)) for (let k = r.paved; k < r.path.length; k++) if (trails.has(r.path[k])) n++;
   return n;
+}
+
+// ------------------------------------------------------------------ ways that grow between settlements
+
+export function pairKey(a: number, b: number) {
+  return a < b ? `${a}:${b}` : `${b}:${a}`;
+}
+
+/** Whether a land route carries enough traffic to be worth paving. */
+function busy(state: GameState, r: TradeRoute) {
+  return (state.traffic[pairKey(r.a, r.b)] ?? 0) >= TRAFFIC_PAVE;
+}
+
+/** Furthest apart two settlements can be and still have people travelling between them. */
+const TRAFFIC_RANGE = 60;
+
+/**
+ * People travelling a day between two settlements on the same land: kin visiting, goods carried,
+ * news. The bigger the places and the closer together, the more.
+ */
+export function trafficFlow(state: GameState, a: Settlement, b: Settlement): number {
+  const map = getMap(state.seed);
+  if (map.island[idx(a.x, a.y)] !== map.island[idx(b.x, b.y)]) return 0;
+  const dist = Math.hypot(a.x - b.x, a.y - b.y);
+  if (dist > TRAFFIC_RANGE) return 0;
+  const c = census(state).residents;
+  return (25 * (c.get(a.id) ?? 0) * (c.get(b.id) ?? 0)) / (dist + 6) ** 2;
+}
+
+/**
+ * The way travellers would wear between two hearths: along roads and trails where they can, else
+ * over the easiest ground, round buildings, fording rivers but never crossing the sea or a peak.
+ */
+export function desirePath(state: GameState, a: Settlement, b: Settlement): number[] | null {
+  const map = getMap(state.seed);
+  const d = derived(state);
+  const n = MAP_W * MAP_H;
+  const roads = new Set(state.roads);
+  const dist = new Float32Array(n).fill(Infinity);
+  const prev = new Int32Array(n).fill(-1);
+  const heap = new Heap();
+  const start = idx(a.x, a.y);
+  const goal = idx(b.x, b.y);
+  const step = (j: number) => {
+    if (roads.has(j)) return 0.3;
+    if (d.network[j]) return 0.5;
+    if (d.buildingAt[j] || map.ocean[j]) return Infinity;
+    const c = SCOUT_DAYS[map.terrain[j]] * 4;
+    return state.explored[j] ? c : c * 1.3;
+  };
+  dist[start] = 0;
+  heap.push(start, 0);
+  while (heap.size) {
+    const i = heap.pop();
+    if (i === goal) {
+      const path: number[] = [];
+      for (let k = goal; k >= 0; k = prev[k]) path.push(k);
+      return path.reverse();
+    }
+    const di = dist[i];
+    for (const [dx, dy] of N4) {
+      const x = tx(i) + dx;
+      const y = ty(i) + dy;
+      if (!inBounds(x, y)) continue;
+      const j = idx(x, y);
+      const c = step(j);
+      if (!isFinite(c) || di + c >= dist[j]) continue;
+      dist[j] = di + c;
+      prev[j] = i;
+      // A* toward the other hearth: no step is cheaper than a road.
+      heap.push(j, dist[j] + Math.hypot(x - b.x, y - b.y) * 0.3);
+    }
+  }
+  return null;
+}
+
+/** Wear a trail along a way: the travellers see the land they cross. */
+function wearTrail(state: GameState, ctx: Ctx, path: number[]) {
+  for (const i of path) if (!state.explored[i]) reveal(state, ctx, tx(i), ty(i), 1);
+  layTrail(state, path);
+  invalidate(state);
+}
+
+export type TieStage = 'none' | 'trail' | 'route' | 'paved';
+
+export interface Tie {
+  a: number;
+  b: number;
+  traffic: number;
+  /** Travel per day at the moment. */
+  flow: number;
+  stage: TieStage;
+  /** What the next stage needs, besides more traffic. */
+  waiting?: string;
+}
+
+/** The ties between settlements on the same land, and how far each has grown. */
+export function ties(state: GameState): Tie[] {
+  const out: Tie[] = [];
+  for (let i = 0; i < state.towns.length; i++)
+    for (let j = i + 1; j < state.towns.length; j++) {
+      const A = state.towns[i];
+      const B = state.towns[j];
+      const flow = trafficFlow(state, A, B);
+      const traffic = state.traffic[pairKey(A.id, B.id)] ?? 0;
+      if (!flow && !traffic) continue;
+      const route = state.routes.find((r) => r.kind === 'land' && pairKey(r.a, r.b) === pairKey(A.id, B.id));
+      const stage: TieStage = route ? (traffic >= TRAFFIC_PAVE ? 'paved' : 'route') : traffic >= TRAFFIC_TRAIL ? 'trail' : 'none';
+      let waiting: string | undefined;
+      if (stage === 'trail' && traffic >= TRAFFIC_ROUTE) waiting = !hasTech(state, 'the_wheel') ? 'Carts need The Wheel' : A.tier < 1 || B.tier < 1 ? 'Both must be at least villages' : undefined;
+      out.push({ a: A.id, b: B.id, traffic, flow, stage, waiting });
+    }
+  return out;
+}
+
+/**
+ * Over the years travel between settlements wears trails between them, carts start to run the busiest
+ * as trade routes, and builders pave those into roads. The ways prefer the roads and trails already
+ * there, so a network grows out of them.
+ */
+function growTraffic(state: GameState, ctx: Ctx) {
+  const DAYS = 10;
+  for (let i = 0; i < state.towns.length; i++)
+    for (let j = i + 1; j < state.towns.length; j++) {
+      const A = state.towns[i];
+      const B = state.towns[j];
+      const flow = trafficFlow(state, A, B);
+      if (!flow) continue;
+      const key = pairKey(A.id, B.id);
+      const before = state.traffic[key] ?? 0;
+      const now = before + flow * DAYS;
+      state.traffic[key] = now;
+      const route = state.routes.find((r) => r.kind === 'land' && pairKey(r.a, r.b) === key);
+      if (route) {
+        if (before < TRAFFIC_PAVE && now >= TRAFFIC_PAVE) note(state, `The way between ${A.name} and ${B.name} is so busy that builders begin to pave it into a road.`, 'realm');
+        continue;
+      }
+      if (before < TRAFFIC_TRAIL && now >= TRAFFIC_TRAIL) {
+        const path = desirePath(state, A, B);
+        const d = derived(state);
+        if (path && path.some((k) => !d.network[k])) {
+          wearTrail(state, ctx, path);
+          note(state, `Travellers between ${A.name} and ${B.name} have worn a trail through the wilds.`, 'realm');
+        }
+      }
+      if (now >= TRAFFIC_ROUTE && hasTech(state, 'the_wheel') && A.tier >= 1 && B.tier >= 1) {
+        const path = desirePath(state, A, B);
+        if (!path) continue;
+        if (path.some((k) => !derived(state).network[k])) wearTrail(state, ctx, path);
+        const r: TradeRoute = { id: state.nextRouteId++, a: A.id, b: B.id, kind: 'land', path, opened: state.day, paved: 0 };
+        state.routes.push(r);
+        invalidate(state);
+        ctx.fx.push({ kind: 'route', route: r.id });
+        note(state, `So many travel between ${A.name} and ${B.name} that carts now run the way as a trade route.`, 'realm');
+      }
+    }
 }
 
 // ------------------------------------------------------------------ the council's realm
@@ -883,16 +1052,20 @@ export function townCalling(state: GameState, town: Settlement): BuildingId[] {
 }
 
 /** Most settlements the realm will aim for in each age, before the Expansion policy. */
-const TOWN_CAP = [1, 2, 4, 6, 8];
+const TOWN_CAP = [1, 3, 8, 16, 30];
+
+/** How many settlements the council aims for now. */
+export function townCap(state: GameState) {
+  return TOWN_CAP[Math.min(eraOf(state), TOWN_CAP.length - 1)] + (choiceOf(state, 'expansion') === 'expand' ? 4 : 0);
+}
 
 /** The council's work beyond the capital: pioneers, voyages and trade routes. */
 function councilRealm(state: GameState, ctx: Ctx) {
   if (!state.council.build || state.day % 5 !== 0) return;
   const policy = choiceOf(state, 'expansion');
   const pop = state.settlers.length;
-  const era = eraOf(state);
   // Pioneers, when the realm is big enough to spare them.
-  const cap = TOWN_CAP[Math.min(era, TOWN_CAP.length - 1)] + (policy === 'expand' ? 2 : 0);
+  const cap = townCap(state);
   if (policy !== 'consolidate' && state.towns.length < cap && pop >= (policy === 'expand' ? 18 : 24) && state.day % 10 === 0 && state.hunger < 0.02) {
     const c = census(state);
     const from = [...state.towns].sort((a, b) => (c.adults.get(b.id) ?? 0) - (c.adults.get(a.id) ?? 0))[0];
@@ -903,7 +1076,7 @@ function councilRealm(state: GameState, ctx: Ctx) {
     const port = state.buildings.find((b) => b.type === 'harbour' && b.done);
     if (port?.town) launchVoyage(state, port.town);
   }
-  // Trade routes, cheapest first, when the stores are comfortable.
+  // Sea trade routes, when the stores are comfortable. (Land routes grow by themselves.)
   if (state.day % 15 === 0) {
     const opt = routeOptions(state).find((o) => o.ok && Object.entries(o.cost).every(([r, v]) => state.res[r as ResourceId] >= (v ?? 0) * 2.5));
     if (opt) openRoute(state, ctx, opt.a, opt.b);
@@ -918,6 +1091,7 @@ export function realmDay(state: GameState, ctx: Ctx, rng: Rng) {
   stepExpeditions(state, ctx, rng);
   if (state.day % 5 === 0) migrate(state);
   if (state.day % 2 === 0) updateTiers(state, ctx);
+  if (state.day % 10 === 0 && state.towns.length > 1) growTraffic(state, ctx);
 }
 
 /** Daily knowledge from trade. */

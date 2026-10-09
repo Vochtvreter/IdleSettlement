@@ -9,8 +9,8 @@ export const ADULT_AGE = 13;
 export const ELDER_AGE = 52;
 
 /** A world large enough for several cities, with oceans between its continents. */
-export const MAP_W = 240;
-export const MAP_H = 180;
+export const MAP_W = 720;
+export const MAP_H = 540;
 
 export interface ResourceDef {
   name: string;
@@ -123,7 +123,7 @@ export const JOB_DEFS: Record<JobId, JobDef> = {
   scout: {
     name: 'Scout',
     plural: 'Scouts',
-    desc: 'Explore the unknown, uncovering lands, ruins and lost tribes.',
+    desc: 'Set out in parties to explore the unknown, uncovering lands, ruins and lost tribes. What they see is only known once they are home again, and the wilds are dangerous.',
     output: {},
     usesTools: false,
     color: '#3fb6a8',
@@ -407,8 +407,8 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
     name: 'The Sunspire',
     desc: 'A towering beacon of stone and bronze, the legacy of your people for all ages. It consumes vast materials as it rises. Completing it wins the game.',
     cost: { wood: 150, stone: 200 },
-    materials: { wood: 800, stone: 1600, ore: 300, tools: 200, knowledge: 600 },
-    work: 2400,
+    materials: { wood: 10000, stone: 20000, ore: 4000, tools: 2500, knowledge: 8000 },
+    work: 30000,
     tech: 'architecture',
     rule: 'land',
     territory: 6,
@@ -461,6 +461,10 @@ export interface TechDef {
   cost: Cost;
   requires?: TechId[];
   minPop?: number;
+  /** Settlements the realm must have. */
+  minTowns?: number;
+  /** A settlement of at least this tier (see TIERS) the realm must have. */
+  minTier?: number;
   /** If set, researching this advances the settlement into the given era. */
   advancesTo?: number;
 }
@@ -472,29 +476,29 @@ export const TECH_DEFS: Record<TechId, TechDef> = {
   furs: { name: 'Fur Clothing', era: 0, cost: { knowledge: 20, hides: 12 }, requires: ['hunting_traps'], desc: 'Warm clothes: winter firewood need -40%, fewer cold deaths.' },
   era_village: { name: 'Village Life', era: 0, cost: { knowledge: 40, wood: 60 }, requires: ['stone_tools'], minPop: 14, advancesTo: 1, desc: 'Settle down for good. Enter the Age of Fields.' },
 
-  agriculture: { name: 'Agriculture', era: 1, cost: { knowledge: 45 }, desc: 'Unlocks Farms and Farmers.' },
-  pottery: { name: 'Pottery', era: 1, cost: { knowledge: 45, stone: 20 }, desc: 'Unlocks Granaries to store the harvest.' },
-  scouting: { name: 'Pathfinding', era: 1, cost: { knowledge: 40 }, desc: 'Unlocks Watchtowers. Scouts +50%. Pioneers can blaze trails into the wilds and found new settlements.' },
-  herbalism: { name: 'Herbalism', era: 1, cost: { knowledge: 60 }, desc: 'Unlocks Herbalists and Healers.' },
-  husbandry: { name: 'Animal Husbandry', era: 1, cost: { knowledge: 70, food: 40 }, requires: ['agriculture'], desc: 'Unlocks Pastures. Hunters +15%.' },
-  era_bronze: { name: 'Chiefdom', era: 1, cost: { knowledge: 120, stone: 100 }, requires: ['agriculture'], minPop: 28, advancesTo: 2, desc: 'Unite the families under one chief. Enter the Age of Bronze.' },
+  agriculture: { name: 'Agriculture', era: 1, cost: { knowledge: 90 }, desc: 'Unlocks Farms and Farmers.' },
+  pottery: { name: 'Pottery', era: 1, cost: { knowledge: 90, stone: 20 }, desc: 'Unlocks Granaries to store the harvest.' },
+  scouting: { name: 'Pathfinding', era: 1, cost: { knowledge: 80 }, desc: 'Unlocks Watchtowers. Scouting parties travel faster, see further and come to less harm. Pioneers can blaze trails into the wilds and found new settlements.' },
+  herbalism: { name: 'Herbalism', era: 1, cost: { knowledge: 120 }, desc: 'Unlocks Herbalists and Healers.' },
+  husbandry: { name: 'Animal Husbandry', era: 1, cost: { knowledge: 140, food: 40 }, requires: ['agriculture'], desc: 'Unlocks Pastures. Hunters +15%.' },
+  era_bronze: { name: 'Chiefdom', era: 1, cost: { knowledge: 240, stone: 100 }, requires: ['agriculture'], minPop: 50, advancesTo: 2, desc: 'Unite the families under one chief. Enter the Age of Bronze.' },
 
-  mining: { name: 'Mining', era: 2, cost: { knowledge: 120 }, desc: 'Unlocks Mines and Miners.' },
-  bronze: { name: 'Bronze Working', era: 2, cost: { knowledge: 150, ore: 30 }, requires: ['mining'], desc: 'Unlocks Smithies. Smiths turn ore into tools.' },
-  writing: { name: 'Writing', era: 2, cost: { knowledge: 140 }, desc: 'Unlocks Libraries. Scholars +25%.' },
-  masonry: { name: 'Masonry', era: 2, cost: { knowledge: 160, stone: 80 }, desc: 'Unlocks Stone Houses. Quarriers +25%.' },
-  the_wheel: { name: 'The Wheel', era: 2, cost: { knowledge: 130, wood: 80 }, desc: 'Builders +50%. Farmers +10%. Carts can run trade routes between settlements.' },
-  seafaring: { name: 'Seafaring', era: 2, cost: { knowledge: 150, wood: 80 }, desc: 'Unlocks Harbours. Galleys chart the seas, carry colonists to other lands and sail trade routes.' },
-  era_iron: { name: 'Township', era: 2, cost: { knowledge: 320, tools: 40 }, requires: ['bronze', 'writing'], minPop: 45, advancesTo: 3, desc: 'Laws, markets and roads. Enter the Age of Iron.' },
+  mining: { name: 'Mining', era: 2, cost: { knowledge: 720 }, desc: 'Unlocks Mines and Miners.' },
+  bronze: { name: 'Bronze Working', era: 2, cost: { knowledge: 900, ore: 60 }, requires: ['mining'], desc: 'Unlocks Smithies. Smiths turn ore into tools.' },
+  writing: { name: 'Writing', era: 2, cost: { knowledge: 840 }, desc: 'Unlocks Libraries. Scholars +25%.' },
+  masonry: { name: 'Masonry', era: 2, cost: { knowledge: 960, stone: 160 }, desc: 'Unlocks Stone Houses. Quarriers +25%.' },
+  the_wheel: { name: 'The Wheel', era: 2, cost: { knowledge: 780, wood: 160 }, desc: 'Builders +50%. Farmers +10%. Carts can run the busiest ways between settlements as trade routes.' },
+  seafaring: { name: 'Seafaring', era: 2, cost: { knowledge: 900, wood: 160 }, desc: 'Unlocks Harbours. Galleys chart the seas, carry colonists to other lands and sail trade routes.' },
+  era_iron: { name: 'Township', era: 2, cost: { knowledge: 1920, tools: 80 }, requires: ['bronze', 'writing'], minPop: 250, minTowns: 6, minTier: 3, advancesTo: 3, desc: 'Laws, markets and roads. Enter the Age of Iron.' },
 
-  iron: { name: 'Iron Smelting', era: 3, cost: { knowledge: 340, ore: 80 }, desc: 'Smiths +60%. Tools grant a larger bonus.' },
-  medicine: { name: 'Medicine', era: 3, cost: { knowledge: 320, hides: 40 }, requires: [], desc: 'People live ~10 years longer. Healers +50%.' },
-  plough: { name: 'Iron Plough', era: 3, cost: { knowledge: 300, tools: 30 }, desc: 'Farmers +40%.' },
-  mathematics: { name: 'Mathematics', era: 3, cost: { knowledge: 400 }, desc: 'Builders +30%, knowledge +15%.' },
-  faith: { name: 'Faith', era: 3, cost: { knowledge: 280 }, desc: 'Unlocks Temples. Morale +5.' },
-  era_wonders: { name: 'Golden Age', era: 3, cost: { knowledge: 700, tools: 80 }, requires: ['iron', 'mathematics'], minPop: 60, advancesTo: 4, desc: 'A flourishing of art and ambition. Enter the Age of Wonders.' },
+  iron: { name: 'Iron Smelting', era: 3, cost: { knowledge: 4080, ore: 280 }, desc: 'Smiths +60%. Tools grant a larger bonus.' },
+  medicine: { name: 'Medicine', era: 3, cost: { knowledge: 3840, hides: 140 }, requires: [], desc: 'People live ~10 years longer. Healers +50%.' },
+  plough: { name: 'Iron Plough', era: 3, cost: { knowledge: 3600, tools: 105 }, desc: 'Farmers +40%.' },
+  mathematics: { name: 'Mathematics', era: 3, cost: { knowledge: 4800 }, desc: 'Builders +30%, knowledge +15%.' },
+  faith: { name: 'Faith', era: 3, cost: { knowledge: 3360 }, desc: 'Unlocks Temples. Morale +5.' },
+  era_wonders: { name: 'Golden Age', era: 3, cost: { knowledge: 8400, tools: 280 }, requires: ['iron', 'mathematics'], minPop: 900, minTowns: 14, minTier: 4, advancesTo: 4, desc: 'A flourishing of art and ambition. Enter the Age of Wonders.' },
 
-  architecture: { name: 'Architecture', era: 4, cost: { knowledge: 900 }, desc: 'The knowledge to raise the Sunspire, a wonder to outlast the ages.' },
+  architecture: { name: 'Architecture', era: 4, cost: { knowledge: 60000 }, minTowns: 18, desc: 'The knowledge to raise the Sunspire, a wonder to outlast the ages.' },
 };
 
 export const TECH_ORDER = Object.keys(TECH_DEFS) as TechId[];
@@ -532,8 +536,8 @@ export const TIERS: TierDef[] = [
   { name: 'Camp', pop: 0, buildings: 0, era: 0, reach: 0 },
   { name: 'Village', pop: 12, buildings: 4, era: 0, reach: 1 },
   { name: 'Town', pop: 32, buildings: 12, era: 1, reach: 3 },
-  { name: 'City', pop: 70, buildings: 24, era: 2, reach: 5 },
-  { name: 'Metropolis', pop: 150, buildings: 45, era: 3, reach: 7 },
+  { name: 'City', pop: 90, buildings: 30, era: 2, reach: 5 },
+  { name: 'Metropolis', pop: 220, buildings: 60, era: 3, reach: 7 },
 ];
 
 /** Pioneers who set out to found a settlement, and what they take with them. */
@@ -541,8 +545,13 @@ export const PIONEERS = 5;
 export const PIONEER_SUPPLIES: Cost = { food: 40, wood: 30 };
 /** A galley to carry them, or to sail a sea route. */
 export const GALLEY_COST: Cost = { wood: 60, hides: 10 };
-/** A land trade route: carts, and stone to pave the trail into a road (paved by builders, tile by tile). */
-export const CARAVAN_COST: Cost = { wood: 30 };
+/**
+ * Travel between two settlements that wears a trail between them, opens a cart route along it, and
+ * gets builders paving it into a road (paved tile by tile, a stone each).
+ */
+export const TRAFFIC_TRAIL = 300;
+export const TRAFFIC_ROUTE = 1200;
+export const TRAFFIC_PAVE = 3000;
 export const PAVE_WORK = 1.5;
 export const PAVE_STONE = 1;
 /** New settlements keep this far from each other. */
@@ -585,17 +594,23 @@ export const FEATURE_NAMES: Record<number, string> = {
   8: 'Forgotten Cache',
 };
 
-/** Exploration points needed to reveal a tile, by terrain. */
-export const EXPLORE_COST: Record<number, number> = {
-  [T.Deep]: 1.2,
-  [T.Water]: 1.2,
-  [T.Sand]: 2,
-  [T.Grass]: 2.2,
-  [T.Meadow]: 2.2,
-  [T.Forest]: 3,
-  [T.Dense]: 3.6,
-  [T.Hills]: 3.5,
-  [T.Mountain]: 5,
-  [T.Peak]: 6,
-  [T.River]: 1.6,
+/** Days for a scouting party to cross a tile on foot, by terrain (Infinity where they cannot go). */
+export const SCOUT_DAYS: Record<number, number> = {
+  [T.Deep]: Infinity,
+  [T.Water]: Infinity,
+  [T.Sand]: 0.3,
+  [T.Grass]: 0.25,
+  [T.Meadow]: 0.25,
+  [T.Forest]: 0.4,
+  [T.Dense]: 0.55,
+  [T.Hills]: 0.45,
+  [T.Mountain]: 0.9,
+  [T.Peak]: Infinity,
+  [T.River]: 0.7,
 };
+/** Most scouts in one party. */
+export const PARTY_SIZE = 3;
+/** Days scouts rest at home between trips. */
+export const SCOUT_REST = 3;
+/** How worn down a party may get before it makes camp for the night. */
+export const CAMP_AT = 3;

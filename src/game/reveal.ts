@@ -21,7 +21,7 @@ export function tabRevealed(s: GameState, t: Tab): boolean {
     case 'research':
       return s.techs.length > 0 || s.objective > 1 || !s.council.research;
     case 'realm':
-      return s.techs.includes('scouting') || s.towns.length > 1 || s.expeditions.length > 0;
+      return s.techs.includes('scouting') || s.towns.length > 1 || s.expeditions.some((e) => e.kind !== 'scout');
     case 'log':
       return s.objective > 0;
   }

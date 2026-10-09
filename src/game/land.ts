@@ -303,8 +303,20 @@ export function prepareSite(state: GameState, b: Building, work: number): { used
 
 // ------------------------------------------------------------------ catchments
 
-/** Where a building's workers take their resource from, nearest (or richest) first. */
+const catchmentMemo = new Map<string, number[]>();
+
+/** Where a building's workers take their resource from, nearest (or richest) first. (Shared: do not change the list.) */
 export function catchmentAt(state: GameState, type: BuildingId, bx: number, by: number, layer: LandLayer): number[] {
+  const key = `${state.seed}:${type}:${bx}:${by}:${layer}`;
+  let c = catchmentMemo.get(key);
+  if (!c) {
+    if (catchmentMemo.size > 50000) catchmentMemo.clear();
+    catchmentMemo.set(key, (c = findCatchment(state, type, bx, by, layer)));
+  }
+  return c;
+}
+
+function findCatchment(state: GameState, type: BuildingId, bx: number, by: number, layer: LandLayer): number[] {
   const m = landMax(state.seed);
   const map = getMap(state.seed);
   const [w, h] = sizeOf(type);
@@ -480,10 +492,7 @@ export function clearTile(state: GameState, i: number) {
  * passes where a trail climbs over, and levelled rock.
  */
 export function passableMask(state: GameState): Uint8Array {
-  const map = getMap(state.seed);
-  const n = MAP_W * MAP_H;
-  const pass = new Uint8Array(n);
-  for (let i = 0; i < n; i++) pass[i] = blocked(map, i) ? 0 : 1;
+  const pass = openGround(state.seed).slice();
   for (const b of state.buildings) if (b.type === 'bridge' && b.done) pass[idx(b.x, b.y)] = 1;
   for (const i of state.trails) pass[i] = 1;
   // A trail paved into road keeps its fords and passes.
@@ -492,8 +501,43 @@ export function passableMask(state: GameState): Uint8Array {
   return pass;
 }
 
-/** Tiles people can walk to from any of the realm's hearths. */
-export function computeReach(state: GameState, pass = passableMask(state)): Uint8Array {
+const openMemo = new Map<number, Uint8Array>();
+
+/** Ground that is not water, a peak or bare rock, as the world was made. */
+function openGround(seed: number): Uint8Array {
+  let m = openMemo.get(seed);
+  if (m) return m;
+  const map = getMap(seed);
+  const n = MAP_W * MAP_H;
+  m = new Uint8Array(n);
+  for (let i = 0; i < n; i++) m[i] = blocked(map, i) ? 0 : 1;
+  if (openMemo.size >= 4) openMemo.delete(openMemo.keys().next().value!);
+  openMemo.set(seed, m);
+  return m;
+}
+
+/**
+ * How far around each hearth the realm's reach and ways are worked out: well beyond the widest
+ * territory, so the work stays local on a great world.
+ */
+export const WORK_RADIUS = 28;
+
+const areaMemo = new WeakMap<GameState, { key: string; m: Uint8Array }>();
+
+/** Tiles within the working radius of any hearth. */
+export function workArea(state: GameState): Uint8Array {
+  const key = state.towns.map((t) => `${t.x},${t.y}`).join(';');
+  const memo = areaMemo.get(state);
+  if (memo && memo.key === key) return memo.m;
+  const m = new Uint8Array(MAP_W * MAP_H);
+  for (const t of state.towns)
+    for (let y = Math.max(0, t.y - WORK_RADIUS); y <= Math.min(MAP_H - 1, t.y + WORK_RADIUS); y++) m.fill(1, idx(Math.max(0, t.x - WORK_RADIUS), y), idx(Math.min(MAP_W - 1, t.x + WORK_RADIUS), y) + 1);
+  areaMemo.set(state, { key, m });
+  return m;
+}
+
+/** Tiles people can walk to from any of the realm's hearths (within the working area). */
+export function computeReach(state: GameState, pass = passableMask(state), area = workArea(state)): Uint8Array {
   const n = MAP_W * MAP_H;
   const reach = new Uint8Array(n);
   const queue: number[] = [];
@@ -508,7 +552,7 @@ export function computeReach(state: GameState, pass = passableMask(state)): Uint
     for (const [dx, dy] of N4) {
       if (!inBounds(x + dx, y + dy)) continue;
       const j = idx(x + dx, y + dy);
-      if (reach[j] || !pass[j]) continue;
+      if (reach[j] || !pass[j] || !area[j]) continue;
       reach[j] = 1;
       queue.push(j);
     }

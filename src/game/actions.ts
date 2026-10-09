@@ -1,4 +1,4 @@
-import { BUILDING_DEFS, ERAS, JOB_DEFS, TECH_DEFS } from './data';
+import { BUILDING_DEFS, ERAS, JOB_DEFS, TECH_DEFS, TIERS } from './data';
 import { buildingCount, canAfford, canPlace, derived, invalidate, pay, refund } from './derived';
 import { resolveChoice } from './events';
 import { footprint, layRoad, prepNeeded, roadPath } from './land';
@@ -91,6 +91,8 @@ export function techStatus(state: GameState, t: TechId): ActionResult & { visibl
   const missing = (def.requires ?? []).filter((r) => !hasTech(state, r));
   if (missing.length) return { ok: false, reason: `Requires ${missing.map((m) => TECH_DEFS[m].name).join(', ')}`, visible: true };
   if (def.minPop && state.settlers.length < def.minPop) return { ok: false, reason: `Requires ${def.minPop} people`, visible: true };
+  if (def.minTowns && state.towns.length < def.minTowns) return { ok: false, reason: `Requires ${def.minTowns} settlements`, visible: true };
+  if (def.minTier && !state.towns.some((t) => t.tier >= def.minTier!)) return { ok: false, reason: `Requires a ${TIERS[def.minTier].name.toLowerCase()}`, visible: true };
   if (!canAfford(state, def.cost)) return { ok: false, reason: 'Not enough resources', visible: true };
   return { ok: true, visible: true };
 }

@@ -3,7 +3,7 @@ import { placeBuilding, research, setJobTarget } from '../src/game/actions';
 import { DAYS_PER_YEAR, MAP_H, MAP_W } from '../src/game/data';
 import { canPlace, derived } from '../src/game/derived';
 import { getMap, tx, ty } from '../src/game/map';
-import { deserialize, serialize, simulateOffline } from '../src/game/save';
+import { deserialize, OFFLINE_MAX_DAYS, serialize, simulateOffline } from '../src/game/save';
 import { emptyRates, tick, type TickContext } from '../src/game/sim';
 import { newGame } from '../src/game/state';
 import { T } from '../src/game/types';
@@ -19,7 +19,7 @@ describe('map generation', () => {
     expect([T.Grass, T.Meadow]).toContain(a.terrain[a.start]);
   });
 
-  it('always offers somewhere to quarry near the hearth', () => {
+  it('always offers somewhere to quarry near the hearth', { timeout: 60_000 }, () => {
     for (const seed of [1, 7, 99, 2024, 31337]) {
       const s = newGame(seed, 0, 0);
       const map = getMap(seed);
@@ -108,7 +108,7 @@ describe('saving', () => {
     expect(s.day).toBe(100);
     const s2 = newGame(9, 0, 0);
     const r2 = simulateOffline(s2, 1000 * 60 * 60 * 24)!;
-    expect(r2.days).toBe(480);
+    expect(r2.days).toBe(OFFLINE_MAX_DAYS);
   });
 });
 

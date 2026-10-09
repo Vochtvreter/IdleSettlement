@@ -3,6 +3,7 @@ import { derived } from '../game/derived';
 import { hearthOf, landMax, tilesOf } from '../game/land';
 import { getMap, idx, inBounds, isWater, tx, ty } from '../game/map';
 import { PASTURE_HERD } from '../game/sim';
+import { inParty } from '../game/realm';
 import { findPath } from './paths';
 import { hash2 } from '../game/rng';
 import type { Building, GameState, JobId, Settler } from '../game/types';
@@ -196,21 +197,10 @@ export class Actors {
         return jitter(hut.x, hut.y + 0.6);
       }
       case 'scout': {
-        if (goHome) return jitter(h.x, h.y + 1, 0.6);
-        // Head toward the edge of the known world.
-        const target = state.exploreTarget ?? null;
-        const ax = target !== null ? tx(target) : h.x;
-        const ay = target !== null ? ty(target) : h.y;
-        for (let k = 0; k < 40; k++) {
-          const ang = Math.random() * Math.PI * 2;
-          const r = target !== null ? Math.random() * 6 : 6 + Math.random() * 14;
-          const x = Math.round(ax + Math.cos(ang) * r);
-          const y = Math.round(ay + Math.sin(ang) * r);
-          if (!inBounds(x, y)) continue;
-          const i = idx(x, y);
-          if (state.explored[i] && land(map.terrain[i])) return jitter(x, y);
-        }
-        return jitter(h.x, h.y + 1);
+        // Home between trips: resting by the fire, or keeping watch from a tower.
+        const tower = site(['watchtower', 'lodge']);
+        if (tower && !goHome) return jitter(tower.x, tower.y + 0.8, 0.4);
+        return jitter(h.x, h.y + 1, 0.8);
       }
       case 'builder': {
         const s = state.buildings.find((b) => !b.done && b.town === w.town) ?? state.buildings.find((b) => !b.done);
@@ -269,10 +259,11 @@ export class Actors {
   }
 
   syncSettlers(state: GameState, stamp: number) {
-    // People of the settlements near the camera; pioneers on the road are drawn as their party.
+    // People of the settlements near the camera; pioneers and scouts out in the wilds are drawn as their party.
     const [fx, fy] = this.focus;
     const near = new Set(state.towns.filter((t) => Math.hypot(t.x - fx, t.y - fy) < 45).map((t) => t.id));
-    const pop = state.settlers.filter((s) => s.town && near.has(s.town));
+    const away = inParty(state);
+    const pop = state.settlers.filter((s) => s.town && near.has(s.town) && !away.has(s.id));
     const show = pop.length <= MAX_WALKERS ? pop : pop.filter((s) => hash2(s.id, 1) < MAX_WALKERS / pop.length);
     for (const s of show) {
       let w = this.walkers.get(s.id);

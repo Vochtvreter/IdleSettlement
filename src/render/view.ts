@@ -3,6 +3,7 @@ import { canPlace, derived } from '../game/derived';
 import { fellLeft, hearthOf, landMax, sizeOf, siteStage, tilesOf } from '../game/land';
 import { getMap, idx, inBounds, isWater, tx, ty } from '../game/map';
 import { townTitle } from '../game/realm';
+import { glimpsed } from '../game/scouting';
 import { hash2 } from '../game/rng';
 import { eraOf, seasonIndex } from '../game/state';
 import type { Building, BuildingId, FxEvent, GameState } from '../game/types';
@@ -12,7 +13,7 @@ import { makeCanvas, sprite } from './sprites';
 import { CHUNK, climateSeason, ForestLayer, OVERVIEW_PX, overviewCanvas, terrainChunk, TILE, TREE_PAL } from './terrain';
 
 /** Zoom levels: below 1 the world is shown from the overview map. */
-export const ZOOMS = [0.25, 0.5, 1, 2, 3, 4, 5, 6];
+export const ZOOMS = [0.0625, 0.125, 0.25, 0.5, 1, 2, 3, 4, 5, 6];
 /** Zoom level index (1-based) for a pixel scale. */
 export const zoomFor = (scale: number) => ZOOMS.indexOf(scale) + 1;
 
@@ -234,17 +235,55 @@ export class MapView {
     window.addEventListener('blur', () => this.keys.clear());
   }
 
+  /** The part of the world the minimap shows: the known world with a margin, in tiles. */
+  private miniWin = { x: 0, y: 0, w: MAP_W, h: MAP_H };
+  private miniKey = '';
+
+  /** Frame the known world (the world is far too large to show whole), keeping the minimap's shape. */
+  private updateMiniWindow(state: GameState) {
+    const key = `${state.seed}:${state.stats.tilesExplored}`;
+    if (key === this.miniKey) return;
+    this.miniKey = key;
+    let x0 = MAP_W;
+    let y0 = MAP_H;
+    let x1 = 0;
+    let y1 = 0;
+    for (let y = 0; y < MAP_H; y++) {
+      const row = y * MAP_W;
+      for (let x = 0; x < MAP_W; x++)
+        if (state.explored[row + x]) {
+          if (x < x0) x0 = x;
+          if (x > x1) x1 = x;
+          if (y < y0) y0 = y;
+          y1 = y;
+        }
+    }
+    if (x1 < x0) return;
+    const pad = 12;
+    let w = Math.max(80, x1 - x0 + 1 + pad * 2);
+    let h = Math.max(60, y1 - y0 + 1 + pad * 2);
+    // Keep the minimap's 4:3 shape.
+    if (w / h > MAP_W / MAP_H) h = w * (MAP_H / MAP_W);
+    else w = h * (MAP_W / MAP_H);
+    w = Math.min(MAP_W, w);
+    h = Math.min(MAP_H, h);
+    const cx = (x0 + x1 + 1) / 2;
+    const cy = (y0 + y1 + 1) / 2;
+    this.miniWin = { x: Math.max(0, Math.min(MAP_W - w, cx - w / 2)), y: Math.max(0, Math.min(MAP_H - h, cy - h / 2)), w, h };
+  }
+
   /** The minimap: the known world, the settlements, and where the camera looks. Click or drag to move. */
   private bindMinimap() {
     const m = document.getElementById('minimap') as HTMLCanvasElement | null;
     if (!m) return;
     this.mini = m;
-    m.width = MAP_W;
-    m.height = MAP_H;
+    m.width = 400;
+    m.height = 300;
     let down = false;
     const go = (e: PointerEvent) => {
       const r = m.getBoundingClientRect();
-      this.centerOn(((e.clientX - r.left) / r.width) * MAP_W, ((e.clientY - r.top) / r.height) * MAP_H);
+      const w = this.miniWin;
+      this.centerOn(w.x + ((e.clientX - r.left) / r.width) * w.w, w.y + ((e.clientY - r.top) / r.height) * w.h);
       this.miniTimer = 0;
     };
     m.addEventListener('pointerdown', (e) => {
@@ -263,31 +302,39 @@ export class MapView {
     this.miniTimer -= dt;
     if (this.miniTimer > 0) return;
     this.miniTimer = 0.3;
+    this.updateMiniWindow(state);
+    const win = this.miniWin;
+    const S = m.width / win.w;
     const ctx = m.getContext('2d')!;
+    ctx.fillStyle = '#0e0b16';
+    ctx.fillRect(0, 0, m.width, m.height);
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(overviewCanvas(state.seed, seasonIndex(state.day)), 0, 0, MAP_W, MAP_H);
+    ctx.drawImage(overviewCanvas(state.seed, seasonIndex(state.day)), win.x * OVERVIEW_PX, win.y * OVERVIEW_PX, win.w * OVERVIEW_PX, win.h * OVERVIEW_PX, 0, 0, m.width, m.height);
     this.updateFog(state);
-    ctx.drawImage(this.fog, 0, 0);
+    ctx.drawImage(this.fog, win.x, win.y, win.w, win.h, 0, 0, m.width, m.height);
+    const X = (x: number) => (x - win.x) * S;
+    const Y = (y: number) => (y - win.y) * S;
+    const dot = Math.max(1, S);
     ctx.fillStyle = '#d9b46c';
-    for (const i of state.roads) ctx.fillRect(tx(i), ty(i), 1, 1);
+    for (const i of state.roads) ctx.fillRect(X(tx(i)), Y(ty(i)), dot, dot);
     for (const t of state.towns) {
-      const r = 1 + t.tier;
+      const r = (1 + t.tier) * Math.max(1, S * 0.6);
       ctx.fillStyle = '#1a1423';
-      ctx.fillRect(t.x - r - 1, t.y - r - 1, 2 * r + 3, 2 * r + 3);
+      ctx.fillRect(X(t.x + 0.5) - r - 1, Y(t.y + 0.5) - r - 1, 2 * r + 2, 2 * r + 2);
       ctx.fillStyle = t === state.towns[0] ? '#ffd25e' : '#f6f2ea';
-      ctx.fillRect(t.x - r, t.y - r, 2 * r + 1, 2 * r + 1);
+      ctx.fillRect(X(t.x + 0.5) - r, Y(t.y + 0.5) - r, 2 * r, 2 * r);
     }
     for (const e of state.expeditions) {
       const i = e.path[e.at];
-      ctx.fillStyle = '#ff7a4a';
-      ctx.fillRect(tx(i) - 1, ty(i) - 1, 3, 3);
+      ctx.fillStyle = e.kind === 'scout' ? '#3fb6a8' : '#ff7a4a';
+      ctx.fillRect(X(tx(i) + 0.5) - 2, Y(ty(i) + 0.5) - 2, 4, 4);
     }
     const s = this.scale;
     const vw = this.canvas.width / s / TILE;
     const vh = this.canvas.height / s / TILE;
     ctx.strokeStyle = '#ffffff';
     ctx.lineWidth = 1;
-    ctx.strokeRect(Math.round(this.cam.x / TILE - vw / 2) + 0.5, Math.round(this.cam.y / TILE - vh / 2) + 0.5, Math.round(vw), Math.round(vh));
+    ctx.strokeRect(Math.round(X(this.cam.x / TILE - vw / 2)) + 0.5, Math.round(Y(this.cam.y / TILE - vh / 2)) + 0.5, Math.round(vw * S), Math.round(vh * S));
   }
 
   handleFx(fx: FxEvent[]) {
@@ -408,7 +455,9 @@ export class MapView {
   // ------------------------------------------------------------ rendering
 
   private updateFog(state: GameState) {
-    const key = `${state.seed}:${state.stats.tilesExplored}`;
+    // Land scouting parties have seen but not yet brought home shows through a thinner fog.
+    const seen = glimpsed(state);
+    const key = `${state.seed}:${state.stats.tilesExplored}:${seen.length}`;
     if (key === this.fogKey) return;
     this.fogKey = key;
     const ctx = this.fog.getContext('2d')!;
@@ -419,6 +468,7 @@ export class MapView {
       img.data[i * 4 + 2] = 22;
       img.data[i * 4 + 3] = state.explored[i] ? 0 : 255;
     }
+    for (const i of seen) img.data[i * 4 + 3] = 150;
     ctx.putImageData(img, 0, 0);
   }
 
@@ -622,6 +672,8 @@ export class MapView {
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(this.fog, 0, 0, MAP_W * TILE, MAP_H * TILE);
     ctx.imageSmoothingEnabled = false;
+    // Scouting parties out in the unknown are drawn above the fog, so you can follow them.
+    for (const it of this.travellers(state, true).sort((a, b) => a.y - b.y)) it.draw();
 
     // Birds fly above the fog
     if (this.detailed) for (const a of this.actors.animals) if (a.kind === 'bird') this.drawAnimal('bird', a.x, a.y, a.phase, a.facing);
@@ -733,7 +785,7 @@ export class MapView {
   }
 
   /** Pioneers on the road, galleys at sea and the caravans and ships of the trade routes. */
-  private travellers(state: GameState): { x: number; y: number; draw: () => void }[] {
+  private travellers(state: GameState, scouts = false): { x: number; y: number; draw: () => void }[] {
     const out: { x: number; y: number; draw: () => void }[] = [];
     const map = getMap(state.seed);
     const at = (path: number[], pos: number): [number, number, number] => {
@@ -745,12 +797,18 @@ export class MapView {
       return [x, y, tx(path[n]) - tx(path[k])];
     };
     for (const e of state.expeditions) {
-      if (!e.path.length) continue;
+      if (!e.path.length || (e.kind === 'scout') !== scouts) continue;
+      if (e.kind === 'scout') {
+        const camped = (e.camp ?? 0) > 0;
+        const [x, y, dir] = at(e.path, e.at + (camped ? 0 : Math.min(0.95, e.step / 0.5)));
+        out.push({ x, y, draw: () => (camped ? this.drawCamp(x, y, e.people.length) : this.drawParty(x, y, e.people.length, dir, true)) });
+        continue;
+      }
       const [x, y, dir] = at(e.path, e.at + Math.min(0.95, e.step));
       const sea = map.ocean[e.path[Math.min(e.path.length - 1, e.at + 1)]] === 1 || map.ocean[e.path[e.at]] === 1;
       out.push({ x, y, draw: () => (sea ? this.drawShip(x, y, dir) : this.drawParty(x, y, e.people.length, dir)) });
     }
-    for (const r of state.routes) {
+    for (const r of scouts ? [] : state.routes) {
       if (r.path.length < 2) continue;
       const L = r.path.length - 1;
       const speed = r.kind === 'sea' ? 2.2 : 0.9;
@@ -793,8 +851,24 @@ export class MapView {
     this.flipDraw(sprite('cart'), px, py, dir < 0 ? -1 : 1);
   }
 
-  /** A pioneer party: a few walkers behind a standard. */
-  private drawParty(x: number, y: number, n: number, dir: number) {
+  /** A scouting party in camp for the night: a tent and a small fire. */
+  private drawCamp(x: number, y: number, n: number) {
+    const ctx = this.ctx;
+    const px = Math.round(x * TILE);
+    const py = Math.round(y * TILE);
+    const tents = sprite('tents');
+    ctx.drawImage(tents, 0, 0, n > 1 ? tents.width : 8, tents.height, px - 8, py - tents.height, n > 1 ? tents.width : 8, tents.height);
+    const flicker = Math.floor(this.time * 8) % 3;
+    ctx.fillStyle = '#5d3b2a';
+    ctx.fillRect(px + 7, py - 1, 4, 1);
+    ctx.fillStyle = flicker ? '#ffb347' : '#ff7a4a';
+    ctx.fillRect(px + 8, py - 3 - (flicker === 2 ? 1 : 0), 2, 2);
+    ctx.fillStyle = '#ffe08a';
+    ctx.fillRect(px + 8, py - 2, 1, 1);
+  }
+
+  /** A party on the road: a few walkers, pioneers behind a standard. */
+  private drawParty(x: number, y: number, n: number, dir: number, scouts = false) {
     const ctx = this.ctx;
     const px = Math.round(x * TILE);
     const py = Math.round(y * TILE);
@@ -805,9 +879,9 @@ export class MapView {
       const sy = py + (k % 2) * 2;
       ctx.fillStyle = 'rgba(10,8,20,0.25)';
       ctx.fillRect(sx - 3, sy - 1, 6, 2);
-      this.flipDraw(sprite(step ? 'person1' : 'person2', { S: shirts[k % shirts.length], A: '#5d3b2a', U: '#4b3b5a' }), sx, sy, dir < 0 ? -1 : 1);
+      this.flipDraw(sprite(step ? 'person1' : 'person2', { S: scouts ? '#3fb6a8' : shirts[k % shirts.length], A: '#5d3b2a', U: '#4b3b5a' }), sx, sy, dir < 0 ? -1 : 1);
     }
-    ctx.drawImage(sprite('flag'), px + (dir < 0 ? -9 : 3), py - 16);
+    if (!scouts) ctx.drawImage(sprite('flag'), px + (dir < 0 ? -9 : 3), py - 16);
   }
 
   private drawLabels(state: GameState, s: number, ox: number, oy: number) {

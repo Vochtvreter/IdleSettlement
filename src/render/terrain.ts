@@ -266,39 +266,66 @@ function renderChunk(map: WorldMap, season: number, cx: number, cy: number, grad
 const overviewCache = new Map<string, HTMLCanvasElement>();
 export const OVERVIEW_PX = 4;
 
-/** The whole world at a few pixels per tile, for zoomed-out views and the minimap. */
+const rgbCache = new Map<string, number[]>();
+
+/** A '#rrggbb' colour as [r, g, b]. */
+function rgb(hex: string): number[] {
+  let c = rgbCache.get(hex);
+  if (!c) rgbCache.set(hex, (c = [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)]));
+  return c;
+}
+
+/** The whole world at a few pixels per tile, for zoomed-out views and the minimap. Painted pixel by pixel: the world is large. */
 export function overviewCanvas(seed: number, season: number): HTMLCanvasElement {
   const key = `${seed}:${season}`;
   let c = overviewCache.get(key);
   if (c) return c;
   const map = getMap(seed);
   const P = OVERVIEW_PX;
-  c = makeCanvas(MAP_W * P, MAP_H * P);
+  const W = MAP_W * P;
+  c = makeCanvas(W, MAP_H * P);
   const ctx = c.getContext('2d')!;
+  const img = ctx.createImageData(W, MAP_H * P);
+  const px = img.data;
+  const put = (x: number, y: number, col: number[], a = 1) => {
+    const o = (y * W + x) * 4;
+    px[o] = a === 1 ? col[0] : px[o] * (1 - a) + col[0] * a;
+    px[o + 1] = a === 1 ? col[1] : px[o + 1] * (1 - a) + col[1] * a;
+    px[o + 2] = a === 1 ? col[2] : px[o + 2] * (1 - a) + col[2] * a;
+    px[o + 3] = 255;
+  };
+  const rect = (x: number, y: number, w: number, h: number, col: number[], a = 1) => {
+    for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) put(xx, yy, col, a);
+  };
+  const SNOW = rgb('#9fb0a6');
+  const SCRUB = rgb('#5f6f2e');
+  const LEAF = rgb('#2a5e2c');
+  const WHITE = rgb('#ffffff');
+  const ROCK = rgb('#c3c6c0');
+  const SHADE = rgb('#5c625e');
+  const HILL = [40, 60, 30];
   for (let y = 0; y < MAP_H; y++)
     for (let x = 0; x < MAP_W; x++) {
       const i = idx(x, y);
       const ter = map.terrain[i];
       const bio = map.biome[i];
       const sea = climateSeason(bio, season);
-      ctx.fillStyle = groundColor(ter, bio, sea);
-      ctx.fillRect(x * P, y * P, P, P);
+      rect(x * P, y * P, P, P, rgb(groundColor(ter, bio, sea)));
       const h = hash2(x, y, 9);
       if (ter === T.Forest || ter === T.Dense) {
-        ctx.fillStyle = sea === 3 ? '#9fb0a6' : bio === Biome.Arid ? '#5f6f2e' : '#2a5e2c';
-        ctx.fillRect(x * P + Math.floor(h * 2), y * P + 1, 2, 2);
-        if (ter === T.Dense) ctx.fillRect(x * P + 2 - Math.floor(h * 2), y * P + 2, 2, 2);
+        const leaf = sea === 3 ? SNOW : bio === Biome.Arid ? SCRUB : LEAF;
+        rect(x * P + Math.floor(h * 2), y * P + 1, 2, 2, leaf);
+        if (ter === T.Dense) rect(x * P + 2 - Math.floor(h * 2), y * P + 2, 2, 2, leaf);
       } else if (ter === T.Mountain || ter === T.Peak) {
-        ctx.fillStyle = ter === T.Peak || sea === 3 ? '#ffffff' : '#c3c6c0';
-        ctx.fillRect(x * P + 1, y * P, 2, 1);
-        ctx.fillStyle = '#5c625e';
-        ctx.fillRect(x * P, y * P + P - 1, P, 1);
+        rect(x * P + 1, y * P, 2, 1, ter === T.Peak || sea === 3 ? WHITE : ROCK);
+        rect(x * P, y * P + P - 1, P, 1, SHADE);
       } else if (ter === T.Hills) {
-        ctx.fillStyle = 'rgba(40,60,30,0.35)';
-        ctx.fillRect(x * P, y * P + P - 1, P, 1);
+        rect(x * P, y * P + P - 1, P, 1, HILL, 0.35);
       }
     }
-  if (overviewCache.size > 8) overviewCache.clear();
+  ctx.putImageData(img, 0, 0);
+  // Only the season in view and the one before are kept: each is large.
+  if (overviewCache.size >= 2) overviewCache.delete(overviewCache.keys().next().value!);
   overviewCache.set(key, c);
   return c;
 }

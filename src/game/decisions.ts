@@ -1,4 +1,4 @@
-import { ERAS, TECH_DEFS } from './data';
+import { ERAS, TECH_DEFS, TIERS } from './data';
 import { invalidate } from './derived';
 import type { GameState, FxEvent, TechId } from './types';
 
@@ -271,7 +271,7 @@ export const PATH_ORDER = ['way', 'path1', 'path2', 'path3', 'path4'];
 // ---------------------------------------------------------------- tweaks
 
 export interface TweakDef {
-  id: 'reserve' | 'housing' | 'scouts' | 'builders';
+  id: 'reserve' | 'housing' | 'scouts' | 'trip' | 'builders';
   name: string;
   desc: string;
   min: number;
@@ -285,7 +285,8 @@ export interface TweakDef {
 export const TWEAKS: TweakDef[] = [
   { id: 'reserve', name: 'Winter reserve', desc: 'Days of food the council stockpiles before winter.', min: 0, max: 30, step: 2, initial: 10, unit: ' days', unlock: 0 },
   { id: 'housing', name: 'Spare homes', desc: 'Empty beds the council keeps ready so families can grow.', min: 0, max: 16, step: 1, initial: 4, unit: ' beds', unlock: 2 },
-  { id: 'scouts', name: 'Scouts', desc: 'How many people the council sends exploring.', min: 0, max: 8, step: 1, initial: 1, unit: '', unlock: 3 },
+  { id: 'scouts', name: 'Scouts', desc: 'How many people the council sends exploring. They set out in parties of up to three.', min: 0, max: 8, step: 1, initial: 1, unit: '', unlock: 3 },
+  { id: 'trip', name: 'Scouting trips', desc: 'Days of provisions a scouting party carries. Longer trips reach further into the unknown, but every day in the wilds is a risk, and a party that is delayed far from home can run out of food.', min: 8, max: 40, step: 2, initial: 20, unit: ' days', unlock: 3 },
   { id: 'builders', name: 'Builders', desc: 'Share of workers on construction while there is something to build.', min: 5, max: 40, step: 5, initial: 12, unit: '%', unlock: 4 },
 ];
 
@@ -310,12 +311,12 @@ export const MILESTONES: MilestoneDef[] = [
   { text: 'Enter the Age of Bronze', hint: 'Choose your next path in the Decide tab.' },
   { text: 'Forge 20 tools', hint: 'Mines and smithies turn ore into tools. An Industry focus helps.' },
   { text: 'Enter the Age of Iron', hint: 'Choose your next path in the Decide tab.' },
-  { text: 'Grow to 60 people', hint: 'A great work needs many hands.' },
+  { text: 'Grow to 200 people', hint: 'A great work needs many hands, across many settlements.' },
   { text: 'Enter the Age of Wonders', hint: 'Choose your final path in the Decide tab.' },
   { text: 'Discover Architecture', hint: 'The final discovery — the council will lay the Sunspire’s foundations.' },
   { text: 'Complete the Sunspire', hint: 'It devours stone, wood, ore, tools and knowledge as it rises.' },
   { text: 'Found a second settlement', hint: 'Pioneers blaze a trail to the best land your scouts have found. See the Realm tab.' },
-  { text: 'Open a trade route', hint: 'Join two villages by cart along a trail, or by galley between two harbours.' },
+  { text: 'Open a trade route', hint: 'As settlements on the same land grow, travel between them becomes a cart route. Galleys can sail between two harbours.' },
   { text: 'Raise a city', hint: 'A settlement becomes a city with enough people and buildings in the Age of Bronze.' },
   { text: 'Found a colony across the sea', hint: 'Build a harbour: galleys chart the coasts and carry pioneers to other lands.' },
   { text: 'Raise a metropolis', hint: 'The greatest cities grow where the land is richest and trade flows.' },
@@ -403,6 +404,8 @@ export function pathRequirements(state: GameState, d: DecisionDef): { ready: boo
   const t = TECH_DEFS[d.tech];
   const needs: string[] = [];
   if (t.minPop && state.settlers.length < t.minPop) needs.push(`${t.minPop} people (now ${state.settlers.length})`);
+  if (t.minTowns && state.towns.length < t.minTowns) needs.push(`${t.minTowns} settlements (now ${state.towns.length})`);
+  if (t.minTier && !state.towns.some((x) => x.tier >= t.minTier!)) needs.push(`A ${TIERS[t.minTier].name.toLowerCase()}`);
   for (const r of t.requires ?? []) if (!state.techs.includes(r)) needs.push(`Discover ${TECH_DEFS[r].name}`);
   // previous path must be chosen
   const idx = PATH_ORDER.indexOf(d.id);

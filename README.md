@@ -8,9 +8,11 @@ discoveries, even while you are away. Your progress comes from the decisions you
 for you. Each age is entered by choosing one of three permanent paths, and new policies and council settings unlock as
 your settlement reaches milestones.
 
-A full playthrough takes roughly **20–40 minutes at normal speed** (2× and 5× speeds are available), depending on your
-choices. After the Sunspire the realm keeps growing toward its own milestones (a colony across the sea, a city, a
-metropolis), and there is a New Game+ "Legacy" loop.
+This is a long game. A day passes every second at normal speed, and raising the Sunspire takes **centuries**: well over
+a hundred in-game years for a decisive player, by which time the realm has grown from one campfire into a score of
+settlements, with cities, harbours and colonies across the sea. That is several hours at normal speed (2×, 5× and 10×
+speeds are available), and time away keeps counting. After the Sunspire the realm keeps growing toward its own
+milestones, and there is a New Game+ "Legacy" loop.
 
 ## A gentle start
 
@@ -22,26 +24,29 @@ up. Tips can be switched off from the menu.
 ## Decisions
 
 - **Crossroads (paths).** Choose your people's Founding Way at any time. When the settlement is ready for a new age
-  (enough people, key discoveries, stored resources), a Crossroads opens. Pick one of three permanent paths to enter the
+  (enough people, key discoveries, stored resources, and in the later ages enough settlements and a city or a
+  metropolis), a Crossroads opens. Pick one of three permanent paths to enter the
   age, e.g. *Tillers of the Soil*, *Herders of the Plain* or *The Wanderers' Road*. The four ages after the first are
   only reached this way. Until you choose, the settlement keeps living and growing, but it stays in its current age.
 - **Council focus.** Balanced, Growth, Industry, Knowledge or Exploration. This shapes how the council staffs jobs,
   what it builds and which discoveries it pursues.
 - **Policies.** These are trade-offs: Rations, Working Hours, Strangers, Families, Forestry, Festivals, Militia,
   Expansion, Markets, Laws and Public Works. Each unlocks at a milestone and can be changed once per season.
-- **Council settings.** These unlock over time: winter food reserve, spare homes, number of scouts and builder share.
+- **Council settings.** These unlock over time: winter food reserve, spare homes, number of scouts, how long scouting
+  trips last and builder share.
   You can also pick which discovery the council researches next.
 - **Events.** Traders, refugees, sages and raiders offer choices. If you ignore them, your people pick the cautious
   option after a few days.
 - **Manual control (optional).** Hand any of work, construction or research back to yourself, commission buildings
-  on specific tiles, and click the map to send scouts.
+  on specific tiles, and click the map to send the next scouting parties there.
 
 ## World features
 
 - **Living population.** Every settler has a name, age, generation and job. Births need free housing, food and good
   morale; people die of old age, illness, hunger, cold, wolves or raids.
 - **Seasons.** Winter brings poor foraging, no harvest and a need for firewood.
-- **A great world.** A 240×180 procedurally generated world of continents and islands with open ocean between them,
+- **A great world.** A vast 720×540 procedurally generated world of a dozen continents and dozens of islands, with
+  open ocean between them,
   in four climates: mild temperate lands, cold boreal pine and tundra in the north, arid steppe and desert in the
   south (where rivers make oases and the hills are rich in ore) and lush tropical jungle. Each climate looks different
   and yields differently: northern harvests are thin but the furs are rich, desert farms need a river. Fog of war, a
@@ -63,9 +68,22 @@ up. Tips can be switched off from the menu.
   the centre, stores and halls sit at its heart, fields spread over the fertile land beyond, and camps, quarries
   and mines go where the timber, stone and ore actually are. When good land lies across a river, the council
   builds a **bridge**. Settlers walk the roads and cross rivers only by bridge.
+- **Settlements that rebuild themselves.** As they grow, settlements tear down what has outlived its use and build
+  anew: worked-out quarries and mines are cleared away, in towns the old huts near the hearth are pulled down for
+  stone houses, in cities rows of homes give way to town blocks, and when a crowded city has no room left for homes,
+  the fields at its heart are given over to them and new fields are broken further out. You can demolish buildings
+  yourself too.
+- **Scouting parties.** Scouts set out together from their settlement, in parties of up to three, with provisions for
+  a trip (a council setting). They walk out into the unknown noting the land on either side, make camp when they are
+  worn down (and survey the country from each camp), and turn for home in time to get back. What they see is only
+  known to the realm once they bring it home: it shows through a thinner fog until then, and is lost if they never
+  return. The wilds are dangerous: falls in the mountains, wolves, fords and winter cold, exhaustion for a party that
+  pushes on without making camp, and hunger for one held up far from home until its provisions run out. Back home
+  they tell of the best land they saw, and the council can send pioneers there; a party of three that comes upon
+  prime land far from home may break camp and settle it, sending one of its number home with the news.
 - **Exploration.** Ruins, supply caches, wanderer camps that join you, sacred groves, game herds and ore veins.
 - **Pioneers and trails.** From the Age of Fields (with Pathfinding), pioneers set out to found new settlements. A
-  pathfinding search spreads from a settlement over the known land, weighing every place they could settle by fresh
+  pathfinding search spreads from a settlement over the land the realm knows, weighing every place they could settle by fresh
   water, fertile soil, timber, stone, ore, game and fish against how long the journey is (with a pull toward climates
   and riches the realm does not have yet). They walk the best path, revealing the land as they go and blazing a rough
   **trail** that is not quite a road: through forest, over hills and mountain passes, across fords. The council sends
@@ -78,11 +96,14 @@ up. Tips can be switched off from the menu.
   a *Farming City* on fertile river land, a *Harbour Village* on a fishing coast, a *Timber Town* in the deep woods.
 - **Seas, galleys and colonies.** Seafaring brings harbours. Galleys chart unknown coasts and carry pioneers across the
   ocean to found colonies on other lands, in other climates.
-- **Trade routes.** Join two settlements by cart along a trail (which builders then pave into a road, tile by tile)
-  or by galley between two harbours. Routes bring knowledge and good cheer, more between bigger places with different
-  climates and trades, and let a settlement's goods reach the realm's stores in full: a settlement joined only by a
-  trail delivers 85%, one cut off (such as a colony with no sea route) only half.
-- **Idle-friendly.** The game autosaves (saves from before the great world cannot be carried over). Time away passes at half speed (up to 12 in-game years) with a summary of
+- **Trade routes that grow by themselves.** People travel between settlements on the same land, more between bigger
+  places that lie closer together, and over the years that travel wears a trail between them. The busiest ways
+  become cart routes (once the realm knows The Wheel and both are villages), and the busiest of those are paved into
+  roads by builders, tile by tile. New ways follow the roads and trails already there, so a network grows out of
+  them. Galleys can sail sea routes between two harbours. Routes bring knowledge and good cheer, more between bigger
+  places with different climates and trades, and let a settlement's goods reach the realm's stores in full: a
+  settlement joined only by a trail delivers 85%, one cut off (such as a colony with no sea route) only half.
+- **Idle-friendly.** The game autosaves (saves from before the great world cannot be carried over). Time away passes at half speed (up to 40 in-game years, played out with the years shown passing) with a summary of
   what happened, and the council keeps working the whole time. Saves can be exported and imported as text.
 - **Pixel art.** All sprites are hand-authored in code, with synthesized sound effects, and the layout is responsive
   down to phone size.
@@ -92,7 +113,7 @@ up. Tips can be switched off from the menu.
 | Action | Input |
 | --- | --- |
 | Pan / zoom | drag · mouse wheel / pinch · `WASD` / arrows · `+` `-` |
-| Pause / speed | `Space` · `1` `2` `3` |
+| Pause / speed | `Space` · `1` `2` `3` `4` (1×, 2×, 5×, 10×) |
 | Centre on hearth | `H` |
 | Tabs | `E` decide · `P` people · `B` build · `R` research · `M` realm · `C` chronicle |
 | Look anywhere | click or drag on the minimap |
@@ -103,8 +124,8 @@ up. Tips can be switched off from the menu.
 
 ```bash
 npm install
-npm run dev        # http://localhost:5173  (add ?dev for debug hooks, a 20× speed on key 4 and skip(days) in the console)
-npm test           # unit tests + balance playthroughs
+npm run dev        # http://localhost:5173  (add ?dev for debug hooks, a 20× speed on key 5 and skip(days) in the console)
+npm test           # unit tests + the opening decades of the balance playthroughs
 npm run build      # static build in dist/
 npm run preview
 ```
@@ -133,6 +154,8 @@ src/game/      pure simulation — no DOM
   map.ts         seeded world generation: continents, oceans, climates, rivers, landmasses
   land.ts        what the land still holds, regrowth, footprints and site preparation, roads, trails, bridges, reach
   realm.ts       settlements and their tiers, migration, pioneers' pathfinding to prime land, voyages, trade routes
+                 and the traffic that grows them
+  scouting.ts    scouting parties: trips, camps, the dangers of the wilds, charts brought home
   sim.ts         the daily tick: production, consumption, construction, exploration, births, deaths, morale
   events.ts      random events and player choices
   actions.ts     everything the player can do
@@ -146,8 +169,9 @@ tests/         unit tests and a heuristic bot (autoplayer.ts) that plays whole g
 
 ### Balance
 
-`tests/balance.test.ts` plays whole games where the council runs everything and a scripted player only makes
-decisions, choosing each path as soon as it is offered. Every run must reach victory without the settlement dying out,
-and a run with no decisions must survive but stay in the first age. Run more seeds with
-`BAL_SEEDS=1,2,3 npm run balance`, or trace a single game year by year with
+`tests/balance.test.ts` plays games where the council runs everything and a scripted player only makes decisions,
+choosing each path as soon as it is offered. `npm test` plays the first 60 years of each seed: the realm must survive
+and reach the Age of Bronze, but not yet the Age of Wonders; and a run with no decisions must survive but stay in the
+first age. `npm run balance` also plays every seed to the end, which takes a while: each must raise the Sunspire after
+120 to 500 years without the realm dying out. Choose the seeds with `BAL_SEEDS=1,2,3 npm run balance`, or trace a single game year by year with
 `TRACE_SEED=42 TRACE_YEARS=30 npx vitest run tests/trace.test.ts --reporter=verbose`.
