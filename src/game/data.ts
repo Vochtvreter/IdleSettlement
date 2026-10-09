@@ -123,7 +123,7 @@ export const JOB_DEFS: Record<JobId, JobDef> = {
   scout: {
     name: 'Scout',
     plural: 'Scouts',
-    desc: 'Explore the unknown, uncovering lands, ruins and lost tribes.',
+    desc: 'Set out in parties to explore the unknown, uncovering lands, ruins and lost tribes. What they see is only known once they are home again, and the wilds are dangerous.',
     output: {},
     usesTools: false,
     color: '#3fb6a8',
@@ -474,7 +474,7 @@ export const TECH_DEFS: Record<TechId, TechDef> = {
 
   agriculture: { name: 'Agriculture', era: 1, cost: { knowledge: 45 }, desc: 'Unlocks Farms and Farmers.' },
   pottery: { name: 'Pottery', era: 1, cost: { knowledge: 45, stone: 20 }, desc: 'Unlocks Granaries to store the harvest.' },
-  scouting: { name: 'Pathfinding', era: 1, cost: { knowledge: 40 }, desc: 'Unlocks Watchtowers. Scouts +50%. Pioneers can blaze trails into the wilds and found new settlements.' },
+  scouting: { name: 'Pathfinding', era: 1, cost: { knowledge: 40 }, desc: 'Unlocks Watchtowers. Scouting parties travel faster, see further and come to less harm. Pioneers can blaze trails into the wilds and found new settlements.' },
   herbalism: { name: 'Herbalism', era: 1, cost: { knowledge: 60 }, desc: 'Unlocks Herbalists and Healers.' },
   husbandry: { name: 'Animal Husbandry', era: 1, cost: { knowledge: 70, food: 40 }, requires: ['agriculture'], desc: 'Unlocks Pastures. Hunters +15%.' },
   era_bronze: { name: 'Chiefdom', era: 1, cost: { knowledge: 120, stone: 100 }, requires: ['agriculture'], minPop: 28, advancesTo: 2, desc: 'Unite the families under one chief. Enter the Age of Bronze.' },
@@ -483,7 +483,7 @@ export const TECH_DEFS: Record<TechId, TechDef> = {
   bronze: { name: 'Bronze Working', era: 2, cost: { knowledge: 150, ore: 30 }, requires: ['mining'], desc: 'Unlocks Smithies. Smiths turn ore into tools.' },
   writing: { name: 'Writing', era: 2, cost: { knowledge: 140 }, desc: 'Unlocks Libraries. Scholars +25%.' },
   masonry: { name: 'Masonry', era: 2, cost: { knowledge: 160, stone: 80 }, desc: 'Unlocks Stone Houses. Quarriers +25%.' },
-  the_wheel: { name: 'The Wheel', era: 2, cost: { knowledge: 130, wood: 80 }, desc: 'Builders +50%. Farmers +10%. Carts can run trade routes between settlements.' },
+  the_wheel: { name: 'The Wheel', era: 2, cost: { knowledge: 130, wood: 80 }, desc: 'Builders +50%. Farmers +10%. Carts can run the busiest ways between settlements as trade routes.' },
   seafaring: { name: 'Seafaring', era: 2, cost: { knowledge: 150, wood: 80 }, desc: 'Unlocks Harbours. Galleys chart the seas, carry colonists to other lands and sail trade routes.' },
   era_iron: { name: 'Township', era: 2, cost: { knowledge: 320, tools: 40 }, requires: ['bronze', 'writing'], minPop: 45, advancesTo: 3, desc: 'Laws, markets and roads. Enter the Age of Iron.' },
 
@@ -541,8 +541,13 @@ export const PIONEERS = 5;
 export const PIONEER_SUPPLIES: Cost = { food: 40, wood: 30 };
 /** A galley to carry them, or to sail a sea route. */
 export const GALLEY_COST: Cost = { wood: 60, hides: 10 };
-/** A land trade route: carts, and stone to pave the trail into a road (paved by builders, tile by tile). */
-export const CARAVAN_COST: Cost = { wood: 30 };
+/**
+ * Travel between two settlements that wears a trail between them, opens a cart route along it, and
+ * gets builders paving it into a road (paved tile by tile, a stone each).
+ */
+export const TRAFFIC_TRAIL = 300;
+export const TRAFFIC_ROUTE = 1200;
+export const TRAFFIC_PAVE = 3000;
 export const PAVE_WORK = 1.5;
 export const PAVE_STONE = 1;
 /** New settlements keep this far from each other. */
@@ -585,17 +590,23 @@ export const FEATURE_NAMES: Record<number, string> = {
   8: 'Forgotten Cache',
 };
 
-/** Exploration points needed to reveal a tile, by terrain. */
-export const EXPLORE_COST: Record<number, number> = {
-  [T.Deep]: 1.2,
-  [T.Water]: 1.2,
-  [T.Sand]: 2,
-  [T.Grass]: 2.2,
-  [T.Meadow]: 2.2,
-  [T.Forest]: 3,
-  [T.Dense]: 3.6,
-  [T.Hills]: 3.5,
-  [T.Mountain]: 5,
-  [T.Peak]: 6,
-  [T.River]: 1.6,
+/** Days for a scouting party to cross a tile on foot, by terrain (Infinity where they cannot go). */
+export const SCOUT_DAYS: Record<number, number> = {
+  [T.Deep]: Infinity,
+  [T.Water]: Infinity,
+  [T.Sand]: 0.3,
+  [T.Grass]: 0.25,
+  [T.Meadow]: 0.25,
+  [T.Forest]: 0.4,
+  [T.Dense]: 0.55,
+  [T.Hills]: 0.45,
+  [T.Mountain]: 0.9,
+  [T.Peak]: Infinity,
+  [T.River]: 0.7,
 };
+/** Most scouts in one party. */
+export const PARTY_SIZE = 3;
+/** Days scouts rest at home between trips. */
+export const SCOUT_REST = 3;
+/** How worn down a party may get before it makes camp for the night. */
+export const CAMP_AT = 3;

@@ -13,11 +13,15 @@ import {
   SEASONS,
   TECH_DEFS,
   TECH_ORDER,
+  TRAFFIC_PAVE,
+  TRAFFIC_ROUTE,
+  TRAFFIC_TRAIL,
 } from '../game/data';
 import { census, derived, jobUnlocked, type Link } from '../game/derived';
 import { fellLeft, siteStage, sizeOf } from '../game/land';
 import { getMap, idx, tx, ty } from '../game/map';
-import { expeditionCost, findSites, launchPioneers, launchVoyage, nextTierNeeds, openRoute, pioneerStatus, routeIncome, routeOptions, siteCalling, siteProfile, townTitle, type SiteChoice } from '../game/realm';
+import { expeditionCost, findSites, launchPioneers, launchVoyage, nextTierNeeds, openRoute, pairKey, pioneerStatus, routeIncome, routeOptions, siteCalling, siteProfile, ties, townTitle, type SiteChoice } from '../game/realm';
+import { partyStatus } from '../game/scouting';
 import { ageOf, eraOf, seasonIndex, year } from '../game/state';
 import { buildMaterials, buildWork, careLevel, gathererCapacity, materialLimit, moraleTarget, popSummary, productivity, toolBonus, yieldEff } from '../game/sim';
 import { councilWish } from '../game/council';
@@ -216,7 +220,7 @@ export class Panels {
       case 'build':
         return `b:${s.techs.length}:${eraOf(s)}:${worksQueue(s).map((b) => b.id).join(',')}:${this.game.view.placing}:${s.council.build}:${s.towns.length}`;
       case 'realm':
-        return `m:${s.towns.map((t) => `${t.id}.${t.tier}`).join(',')}:${s.expeditions.map((e) => e.id).join(',')}:${s.routes.length}:${s.techs.length}:${s.council.build}:${this.choosing}:${s.buildings.filter((b) => b.type === 'harbour' && b.done).length}`;
+        return `m:${s.towns.map((t) => `${t.id}.${t.tier}`).join(',')}:${s.expeditions.map((e) => e.id).join(',')}:${s.routes.length}:${ties(s).filter((t) => t.stage === 'none' || t.stage === 'trail').length}:${s.techs.length}:${s.council.build}:${this.choosing}:${s.buildings.filter((b) => b.type === 'harbour' && b.done).length}`;
       case 'research':
         return `r:${s.techs.length}:${eraOf(s)}:${s.council.research}:${s.pin}:${s.objective > PIN_UNLOCK}`;
       case 'log':
@@ -349,7 +353,9 @@ export class Panels {
     if (j === 'healer') return `Care: ${Math.round(careLevel(s, n) * 100)}% of the people`;
     if (j === 'scout') {
       const left = s.explored.length - s.stats.tilesExplored;
-      return left <= 0 ? 'The whole land is known' : `${Math.round((s.stats.tilesExplored / (MAP_W * MAP_H)) * 100)}% of the land explored`;
+      const out = s.expeditions.filter((e) => e.kind === 'scout').length;
+      const parties = out ? ` · ${out} part${out > 1 ? 'ies' : 'y'} in the wilds` : '';
+      return left <= 0 ? 'The whole land is known' : `${Math.round((s.stats.tilesExplored / (MAP_W * MAP_H)) * 100)}% of the land known${parties}`;
     }
     if (j === 'builder') {
       const sites = derived(s).sites.length;
@@ -506,7 +512,7 @@ export class Panels {
       road: 'Joined by road',
       route: 'Joined by a trade route',
       trail: 'Joined by a trail: 85% of its goods arrive',
-      none: 'Cut off: only half its goods arrive. Open a trade route.',
+      none: 'Cut off: only half its goods arrive until a trail or trade route joins it.',
     };
     b.append(h('div', { class: 'section-title' }, `Settlements (${s.towns.length})`));
     for (const t of s.towns) {
@@ -541,22 +547,32 @@ export class Panels {
       });
     }
 
-    // Pioneers and voyages
-    b.append(h('div', { class: 'section-title' }, 'Pioneers'));
-    if (s.expeditions.length) {
-      for (const e of s.expeditions) {
-        const bar = h('i');
-        const from = s.towns.find((t) => t.id === e.from)?.name ?? '';
-        const label = e.kind === 'voyage' ? `A galley out of ${from}, charting the seas` : `${e.people.length} pioneers from ${from}`;
-        const row = h('div', { class: 'queue-item' }, img(e.kind === 'voyage' ? 'i_scout' : 'i_flag', 2), h('div', { style: 'flex:1' }, h('div', null, label), h('div', { class: 'bar' }, bar)));
-        row.style.cursor = 'pointer';
-        row.addEventListener('click', () => {
-          const i = e.path[e.at];
-          this.game.view.centerOn(tx(i) + 0.5, ty(i) + 0.5);
-        });
-        b.append(row);
-        this.updaters.push(() => (bar.style.width = `${Math.round((e.at / Math.max(1, e.path.length - 1)) * 100)}%`));
-      }
+    // Pioneers, voyages and scouting parties
+    b.append(h('div', { class: 'section-title' }, 'In the field'));
+    if (!s.expeditions.length) b.append(h('div', { class: 'ts', style: 'font-size:12px;color:var(--muted)' }, 'No one is out in the wilds just now.'));
+    for (const e of s.expeditions) {
+      const bar = h('i');
+      const from = s.towns.find((t) => t.id === e.from)?.name ?? '';
+      const label = h('div');
+      const status = h('div', { class: 'ts', style: 'font-size:11px;color:var(--muted)' });
+      const icon = e.kind === 'settle' ? 'i_flag' : 'i_scout';
+      const row = h('div', { class: 'queue-item' }, img(icon, 2), h('div', { style: 'flex:1' }, label, status, h('div', { class: 'bar' }, bar)));
+      row.style.cursor = 'pointer';
+      row.addEventListener('click', () => {
+        const i = e.path[e.at];
+        this.game.view.centerOn(tx(i) + 0.5, ty(i) + 0.5);
+      });
+      b.append(row);
+      this.updaters.push(() => {
+        const g = this.game.state;
+        bar.style.width = `${Math.round((e.at / Math.max(1, e.path.length - 1)) * 100)}%`;
+        if (e.kind === 'voyage') label.textContent = `A galley out of ${from}, charting the seas`;
+        else if (e.kind === 'settle') label.textContent = `${e.people.length} pioneers from ${from}`;
+        else {
+          label.textContent = e.messenger ? `A messenger hurrying home to ${from}` : `${e.people.length} scout${e.people.length > 1 ? 's' : ''} from ${from}`;
+          status.textContent = partyStatus(g, e);
+        }
+      });
     }
     const from = [...s.towns].sort((a, c) => (census(s).adults.get(c.id) ?? 0) - (census(s).adults.get(a.id) ?? 0))[0];
     const status = pioneerStatus(s, from.id);
@@ -642,6 +658,14 @@ export class Panels {
     // Trade routes
     b.append(h('div', { class: 'section-title' }, `Trade routes (${s.routes.length})`));
     if (s.towns.length < 2) b.append(h('div', { class: 'ts', style: 'font-size:12px;color:var(--muted)' }, 'Trade needs a second settlement.'));
+    else
+      b.append(
+        h(
+          'div',
+          { class: 'council-note' },
+          'Over the years, people travelling between settlements on the same land wear trails between them. The busiest ways become cart routes, and the busiest routes are paved into roads. Bigger places that lie closer together get there sooner.',
+        ),
+      );
     for (const r of s.routes) {
       const A = s.towns.find((t) => t.id === r.a)?.name;
       const B = s.towns.find((t) => t.id === r.b)?.name;
@@ -652,12 +676,39 @@ export class Panels {
         const g = this.game.state;
         const trails = new Set(g.trails);
         const left = r.kind === 'land' ? r.path.filter((i, k) => k >= r.paved && trails.has(i)).length : 0;
-        inc.textContent = `+${routeIncome(g, r).toFixed(2)} knowledge/day${left ? ` · ${left} tiles of trail still to pave` : ''}`;
+        const traffic = g.traffic[pairKey(r.a, r.b)] ?? 0;
+        const paving = r.kind !== 'land' || !left ? '' : traffic < TRAFFIC_PAVE ? ` · paving starts when it is busier (${Math.round((traffic / TRAFFIC_PAVE) * 100)}%)` : ` · ${left} tiles of trail still to pave`;
+        inc.textContent = `+${routeIncome(g, r).toFixed(2)} knowledge/day${paving}`;
+      });
+    }
+    // Ways still growing between settlements on the same land.
+    for (const t of ties(s)) {
+      if (t.stage === 'route' || t.stage === 'paved') continue;
+      const A = s.towns.find((x) => x.id === t.a)?.name;
+      const B = s.towns.find((x) => x.id === t.b)?.name;
+      const bar = h('i');
+      const what = h('div', { class: 'ts', style: 'font-size:11px;color:var(--muted)' });
+      b.append(h('div', { class: 'queue-item route-option' }, h('div', { style: 'flex:1;min-width:0' }, h('div', null, `${A} – ${B}`), what, h('div', { class: 'bar' }, bar))));
+      this.updaters.push(() => {
+        const now = ties(this.game.state).find((x) => x.a === t.a && x.b === t.b);
+        if (!now) return;
+        const goal = now.stage === 'none' ? TRAFFIC_TRAIL : TRAFFIC_ROUTE;
+        bar.style.width = `${Math.min(100, Math.round((now.traffic / goal) * 100))}%`;
+        const pace = now.flow > 0 ? ` · ${now.flow < 1 ? 'a few' : Math.round(now.flow)} travellers a day` : '';
+        what.textContent =
+          now.stage === 'route' || now.stage === 'paved'
+            ? 'Carts now run this way'
+            : now.waiting
+              ? `Busy enough for carts: ${now.waiting}`
+              : now.stage === 'none'
+                ? `Travellers are wearing a trail${pace}`
+                : `Trail worn, trade growing toward a cart route${pace}`;
       });
     }
     for (const o of routeOptions(s).slice(0, 8)) {
       const A = s.towns.find((t) => t.id === o.a)?.name;
       const B = s.towns.find((t) => t.id === o.b)?.name;
+      if (!o.path.length) continue;
       const btn = h('button', { class: 'btn small' + (o.ok ? ' primary' : '') }, 'Open');
       if (!o.ok) btn.setAttribute('disabled', '');
       btn.addEventListener('click', () => {
@@ -669,7 +720,7 @@ export class Panels {
         h(
           'div',
           { class: 'queue-item route-option' },
-          h('div', { style: 'flex:1;min-width:0' }, h('div', null, `${A} – ${B}`, h('span', { style: 'color:var(--muted);font-size:11px' }, o.kind === 'sea' ? ' · by sea' : ' · by land')), o.ok ? costEl(s, o.cost) : h('div', { class: 'ts', style: 'font-size:11px;color:var(--muted)' }, o.reason ?? '')),
+          h('div', { style: 'flex:1;min-width:0' }, h('div', null, `${A} – ${B}`, h('span', { style: 'color:var(--muted);font-size:11px' }, ' · by sea')), o.ok ? costEl(s, o.cost) : h('div', { class: 'ts', style: 'font-size:11px;color:var(--muted)' }, o.reason ?? '')),
           o.ok ? btn : null,
         ),
       );

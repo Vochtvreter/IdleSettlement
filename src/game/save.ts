@@ -81,6 +81,8 @@ export function deserialize(json: string): GameState | null {
     raw.graded ??= [];
     raw.expeditions ??= [];
     raw.routes ??= [];
+    raw.traffic ??= {};
+    delete raw.exploreProgress;
     raw.landEpoch ??= 0;
     raw.eff ??= {};
     if (!Array.isArray(raw.towns) || !raw.towns.length) return null;

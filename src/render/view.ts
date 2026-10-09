@@ -3,6 +3,7 @@ import { canPlace, derived } from '../game/derived';
 import { fellLeft, hearthOf, landMax, sizeOf, siteStage, tilesOf } from '../game/land';
 import { getMap, idx, inBounds, isWater, tx, ty } from '../game/map';
 import { townTitle } from '../game/realm';
+import { glimpsed } from '../game/scouting';
 import { hash2 } from '../game/rng';
 import { eraOf, seasonIndex } from '../game/state';
 import type { Building, BuildingId, FxEvent, GameState } from '../game/types';
@@ -279,7 +280,7 @@ export class MapView {
     }
     for (const e of state.expeditions) {
       const i = e.path[e.at];
-      ctx.fillStyle = '#ff7a4a';
+      ctx.fillStyle = e.kind === 'scout' ? '#3fb6a8' : '#ff7a4a';
       ctx.fillRect(tx(i) - 1, ty(i) - 1, 3, 3);
     }
     const s = this.scale;
@@ -408,7 +409,9 @@ export class MapView {
   // ------------------------------------------------------------ rendering
 
   private updateFog(state: GameState) {
-    const key = `${state.seed}:${state.stats.tilesExplored}`;
+    // Land scouting parties have seen but not yet brought home shows through a thinner fog.
+    const seen = glimpsed(state);
+    const key = `${state.seed}:${state.stats.tilesExplored}:${seen.length}`;
     if (key === this.fogKey) return;
     this.fogKey = key;
     const ctx = this.fog.getContext('2d')!;
@@ -419,6 +422,7 @@ export class MapView {
       img.data[i * 4 + 2] = 22;
       img.data[i * 4 + 3] = state.explored[i] ? 0 : 255;
     }
+    for (const i of seen) img.data[i * 4 + 3] = 150;
     ctx.putImageData(img, 0, 0);
   }
 
@@ -622,6 +626,8 @@ export class MapView {
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(this.fog, 0, 0, MAP_W * TILE, MAP_H * TILE);
     ctx.imageSmoothingEnabled = false;
+    // Scouting parties out in the unknown are drawn above the fog, so you can follow them.
+    for (const it of this.travellers(state, true).sort((a, b) => a.y - b.y)) it.draw();
 
     // Birds fly above the fog
     if (this.detailed) for (const a of this.actors.animals) if (a.kind === 'bird') this.drawAnimal('bird', a.x, a.y, a.phase, a.facing);
@@ -733,7 +739,7 @@ export class MapView {
   }
 
   /** Pioneers on the road, galleys at sea and the caravans and ships of the trade routes. */
-  private travellers(state: GameState): { x: number; y: number; draw: () => void }[] {
+  private travellers(state: GameState, scouts = false): { x: number; y: number; draw: () => void }[] {
     const out: { x: number; y: number; draw: () => void }[] = [];
     const map = getMap(state.seed);
     const at = (path: number[], pos: number): [number, number, number] => {
@@ -745,12 +751,18 @@ export class MapView {
       return [x, y, tx(path[n]) - tx(path[k])];
     };
     for (const e of state.expeditions) {
-      if (!e.path.length) continue;
+      if (!e.path.length || (e.kind === 'scout') !== scouts) continue;
+      if (e.kind === 'scout') {
+        const camped = (e.camp ?? 0) > 0;
+        const [x, y, dir] = at(e.path, e.at + (camped ? 0 : Math.min(0.95, e.step / 0.5)));
+        out.push({ x, y, draw: () => (camped ? this.drawCamp(x, y, e.people.length) : this.drawParty(x, y, e.people.length, dir, true)) });
+        continue;
+      }
       const [x, y, dir] = at(e.path, e.at + Math.min(0.95, e.step));
       const sea = map.ocean[e.path[Math.min(e.path.length - 1, e.at + 1)]] === 1 || map.ocean[e.path[e.at]] === 1;
       out.push({ x, y, draw: () => (sea ? this.drawShip(x, y, dir) : this.drawParty(x, y, e.people.length, dir)) });
     }
-    for (const r of state.routes) {
+    for (const r of scouts ? [] : state.routes) {
       if (r.path.length < 2) continue;
       const L = r.path.length - 1;
       const speed = r.kind === 'sea' ? 2.2 : 0.9;
@@ -793,8 +805,24 @@ export class MapView {
     this.flipDraw(sprite('cart'), px, py, dir < 0 ? -1 : 1);
   }
 
-  /** A pioneer party: a few walkers behind a standard. */
-  private drawParty(x: number, y: number, n: number, dir: number) {
+  /** A scouting party in camp for the night: a tent and a small fire. */
+  private drawCamp(x: number, y: number, n: number) {
+    const ctx = this.ctx;
+    const px = Math.round(x * TILE);
+    const py = Math.round(y * TILE);
+    const tents = sprite('tents');
+    ctx.drawImage(tents, 0, 0, n > 1 ? tents.width : 8, tents.height, px - 8, py - tents.height, n > 1 ? tents.width : 8, tents.height);
+    const flicker = Math.floor(this.time * 8) % 3;
+    ctx.fillStyle = '#5d3b2a';
+    ctx.fillRect(px + 7, py - 1, 4, 1);
+    ctx.fillStyle = flicker ? '#ffb347' : '#ff7a4a';
+    ctx.fillRect(px + 8, py - 3 - (flicker === 2 ? 1 : 0), 2, 2);
+    ctx.fillStyle = '#ffe08a';
+    ctx.fillRect(px + 8, py - 2, 1, 1);
+  }
+
+  /** A party on the road: a few walkers, pioneers behind a standard. */
+  private drawParty(x: number, y: number, n: number, dir: number, scouts = false) {
     const ctx = this.ctx;
     const px = Math.round(x * TILE);
     const py = Math.round(y * TILE);
@@ -805,9 +833,9 @@ export class MapView {
       const sy = py + (k % 2) * 2;
       ctx.fillStyle = 'rgba(10,8,20,0.25)';
       ctx.fillRect(sx - 3, sy - 1, 6, 2);
-      this.flipDraw(sprite(step ? 'person1' : 'person2', { S: shirts[k % shirts.length], A: '#5d3b2a', U: '#4b3b5a' }), sx, sy, dir < 0 ? -1 : 1);
+      this.flipDraw(sprite(step ? 'person1' : 'person2', { S: scouts ? '#3fb6a8' : shirts[k % shirts.length], A: '#5d3b2a', U: '#4b3b5a' }), sx, sy, dir < 0 ? -1 : 1);
     }
-    ctx.drawImage(sprite('flag'), px + (dir < 0 ? -9 : 3), py - 16);
+    if (!scouts) ctx.drawImage(sprite('flag'), px + (dir < 0 ? -9 : 3), py - 16);
   }
 
   private drawLabels(state: GameState, s: number, ox: number, oy: number) {

@@ -29,12 +29,13 @@ up. Tips can be switched off from the menu.
   what it builds and which discoveries it pursues.
 - **Policies.** These are trade-offs: Rations, Working Hours, Strangers, Families, Forestry, Festivals, Militia,
   Expansion, Markets, Laws and Public Works. Each unlocks at a milestone and can be changed once per season.
-- **Council settings.** These unlock over time: winter food reserve, spare homes, number of scouts and builder share.
+- **Council settings.** These unlock over time: winter food reserve, spare homes, number of scouts, how long scouting
+  trips last and builder share.
   You can also pick which discovery the council researches next.
 - **Events.** Traders, refugees, sages and raiders offer choices. If you ignore them, your people pick the cautious
   option after a few days.
 - **Manual control (optional).** Hand any of work, construction or research back to yourself, commission buildings
-  on specific tiles, and click the map to send scouts.
+  on specific tiles, and click the map to send the next scouting parties there.
 
 ## World features
 
@@ -63,9 +64,17 @@ up. Tips can be switched off from the menu.
   the centre, stores and halls sit at its heart, fields spread over the fertile land beyond, and camps, quarries
   and mines go where the timber, stone and ore actually are. When good land lies across a river, the council
   builds a **bridge**. Settlers walk the roads and cross rivers only by bridge.
+- **Scouting parties.** Scouts set out together from their settlement, in parties of up to three, with provisions for
+  a trip (a council setting). They walk out into the unknown noting the land on either side, make camp when they are
+  worn down (and survey the country from each camp), and turn for home in time to get back. What they see is only
+  known to the realm once they bring it home: it shows through a thinner fog until then, and is lost if they never
+  return. The wilds are dangerous: falls in the mountains, wolves, fords and winter cold, exhaustion for a party that
+  pushes on without making camp, and hunger for one held up far from home until its provisions run out. Back home
+  they tell of the best land they saw, and the council can send pioneers there; a party of three that comes upon
+  prime land far from home may break camp and settle it, sending one of its number home with the news.
 - **Exploration.** Ruins, supply caches, wanderer camps that join you, sacred groves, game herds and ore veins.
 - **Pioneers and trails.** From the Age of Fields (with Pathfinding), pioneers set out to found new settlements. A
-  pathfinding search spreads from a settlement over the known land, weighing every place they could settle by fresh
+  pathfinding search spreads from a settlement over the land the realm knows, weighing every place they could settle by fresh
   water, fertile soil, timber, stone, ore, game and fish against how long the journey is (with a pull toward climates
   and riches the realm does not have yet). They walk the best path, revealing the land as they go and blazing a rough
   **trail** that is not quite a road: through forest, over hills and mountain passes, across fords. The council sends
@@ -78,10 +87,13 @@ up. Tips can be switched off from the menu.
   a *Farming City* on fertile river land, a *Harbour Village* on a fishing coast, a *Timber Town* in the deep woods.
 - **Seas, galleys and colonies.** Seafaring brings harbours. Galleys chart unknown coasts and carry pioneers across the
   ocean to found colonies on other lands, in other climates.
-- **Trade routes.** Join two settlements by cart along a trail (which builders then pave into a road, tile by tile)
-  or by galley between two harbours. Routes bring knowledge and good cheer, more between bigger places with different
-  climates and trades, and let a settlement's goods reach the realm's stores in full: a settlement joined only by a
-  trail delivers 85%, one cut off (such as a colony with no sea route) only half.
+- **Trade routes that grow by themselves.** People travel between settlements on the same land, more between bigger
+  places that lie closer together, and over the years that travel wears a trail between them. The busiest ways
+  become cart routes (once the realm knows The Wheel and both are villages), and the busiest of those are paved into
+  roads by builders, tile by tile. New ways follow the roads and trails already there, so a network grows out of
+  them. Galleys can sail sea routes between two harbours. Routes bring knowledge and good cheer, more between bigger
+  places with different climates and trades, and let a settlement's goods reach the realm's stores in full: a
+  settlement joined only by a trail delivers 85%, one cut off (such as a colony with no sea route) only half.
 - **Idle-friendly.** The game autosaves (saves from before the great world cannot be carried over). Time away passes at half speed (up to 12 in-game years) with a summary of
   what happened, and the council keeps working the whole time. Saves can be exported and imported as text.
 - **Pixel art.** All sprites are hand-authored in code, with synthesized sound effects, and the layout is responsive
@@ -133,6 +145,8 @@ src/game/      pure simulation — no DOM
   map.ts         seeded world generation: continents, oceans, climates, rivers, landmasses
   land.ts        what the land still holds, regrowth, footprints and site preparation, roads, trails, bridges, reach
   realm.ts       settlements and their tiers, migration, pioneers' pathfinding to prime land, voyages, trade routes
+                 and the traffic that grows them
+  scouting.ts    scouting parties: trips, camps, the dangers of the wilds, charts brought home
   sim.ts         the daily tick: production, consumption, construction, exploration, births, deaths, morale
   events.ts      random events and player choices
   actions.ts     everything the player can do

@@ -112,6 +112,8 @@ export interface Settler {
   f: boolean;
   /** Settlement this person lives in; 0 while on the road with pioneers. */
   town: number;
+  /** Scouts: the day they came home from their last trip (they rest a few days before setting out again). */
+  back?: number;
 }
 
 export interface Building {
@@ -163,11 +165,11 @@ export interface Settlement {
 
 /**
  * People on the move: pioneers blazing a trail to found a new settlement (by land, or by galley across
- * the sea), or a galley voyage charting unknown coasts.
+ * the sea), a galley voyage charting unknown coasts, or a scouting party out in the wilds and back.
  */
 export interface Expedition {
   id: number;
-  kind: 'settle' | 'voyage';
+  kind: 'settle' | 'voyage' | 'scout';
   /** Settlement they set out from. */
   from: number;
   /** Tiles to pass through, in order, starting where they set out. */
@@ -175,9 +177,21 @@ export interface Expedition {
   /** Index into `path` of the tile they are on, and how far they are toward the next (0..1). */
   at: number;
   step: number;
-  /** Settlers travelling (pioneers only). */
+  /** Settlers travelling (pioneers and scouts). */
   people: number[];
   started: number;
+  /** Scouting parties: index into `path` where they turn for home. */
+  turn?: number;
+  /** Scouting parties: days of provisions left. */
+  food?: number;
+  /** Scouting parties: how worn down they are since they last made camp. */
+  weary?: number;
+  /** Scouting parties: days still to spend in camp. */
+  camp?: number;
+  /** Scouting parties: unknown land they have seen. The realm only learns of it when they get home. */
+  found?: number[];
+  /** Scouting parties: one of them hurrying home with news of a settlement the rest have founded, blazing a trail. */
+  messenger?: boolean;
 }
 
 /** A trade route between two settlements, by land along a trail or road, or by galley over the sea. */
@@ -188,7 +202,7 @@ export interface TradeRoute {
   kind: 'land' | 'sea';
   path: number[];
   opened: number;
-  /** Land routes: how many tiles of the trail have been paved into road so far. */
+  /** Land routes: how many tiles of the trail have been paved into road so far (paving waits for enough traffic). */
   paved: number;
   /** Work put into paving the next tile. */
   work?: number;
@@ -254,7 +268,7 @@ export interface GameState {
   explored: number[];
   /** Tile indices whose feature has been claimed (discovery resolved). */
   claimed: number[];
-  exploreProgress: number;
+  /** Land scouting parties should head for next. */
   exploreTarget: number | null;
   morale: number;
   modifiers: Modifier[];
@@ -266,7 +280,7 @@ export interface GameState {
   decisions: Record<string, string>;
   /** Day each policy was last changed (for the cooldown). */
   decidedDay: Record<string, number>;
-  tweaks: Partial<Record<'reserve' | 'housing' | 'scouts' | 'builders', number>>;
+  tweaks: Partial<Record<'reserve' | 'housing' | 'scouts' | 'trip' | 'builders', number>>;
   /** Which areas the council manages automatically. */
   council: { jobs: boolean; build: boolean; research: boolean };
   /** Discovery the council should research next. */
@@ -293,6 +307,11 @@ export interface GameState {
   nextExpId: number;
   routes: TradeRoute[];
   nextRouteId: number;
+  /**
+   * Travel between pairs of settlements on the same land (keyed "a:b", a < b), built up over the years:
+   * the bigger and closer they are, the faster. It wears a trail, then opens a cart route, then paves it.
+   */
+  traffic: Record<string, number>;
   /** Bumped whenever the land changes in a way that affects building rules or slots. */
   landEpoch: number;
   /** Smoothed share of the full output each job actually achieved, given what the land had left. */

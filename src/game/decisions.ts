@@ -271,7 +271,7 @@ export const PATH_ORDER = ['way', 'path1', 'path2', 'path3', 'path4'];
 // ---------------------------------------------------------------- tweaks
 
 export interface TweakDef {
-  id: 'reserve' | 'housing' | 'scouts' | 'builders';
+  id: 'reserve' | 'housing' | 'scouts' | 'trip' | 'builders';
   name: string;
   desc: string;
   min: number;
@@ -285,7 +285,8 @@ export interface TweakDef {
 export const TWEAKS: TweakDef[] = [
   { id: 'reserve', name: 'Winter reserve', desc: 'Days of food the council stockpiles before winter.', min: 0, max: 30, step: 2, initial: 10, unit: ' days', unlock: 0 },
   { id: 'housing', name: 'Spare homes', desc: 'Empty beds the council keeps ready so families can grow.', min: 0, max: 16, step: 1, initial: 4, unit: ' beds', unlock: 2 },
-  { id: 'scouts', name: 'Scouts', desc: 'How many people the council sends exploring.', min: 0, max: 8, step: 1, initial: 1, unit: '', unlock: 3 },
+  { id: 'scouts', name: 'Scouts', desc: 'How many people the council sends exploring. They set out in parties of up to three.', min: 0, max: 8, step: 1, initial: 1, unit: '', unlock: 3 },
+  { id: 'trip', name: 'Scouting trips', desc: 'Days of provisions a scouting party carries. Longer trips reach further into the unknown, but every day in the wilds is a risk, and a party that is delayed far from home can run out of food.', min: 8, max: 40, step: 2, initial: 20, unit: ' days', unlock: 3 },
   { id: 'builders', name: 'Builders', desc: 'Share of workers on construction while there is something to build.', min: 5, max: 40, step: 5, initial: 12, unit: '%', unlock: 4 },
 ];
 

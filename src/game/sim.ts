@@ -3,21 +3,20 @@ import {
   BUILDING_DEFS,
   DAYS_PER_YEAR,
   ELDER_AGE,
-  EXPLORE_COST,
   JOB_DEFS,
-  MAP_H,
-  MAP_W,
+  PARTY_SIZE,
 } from './data';
 import { census, derived, invalidate, jobUnlocked } from './derived';
 import { worksQueue } from './actions';
-import { centerOf, drawFrom, fellLeft, growLand, Heap, landFrac, landMax, prepareSite } from './land';
-import { loseTraveller, paveRoutes, realmDay, setRevealHook, townWithRoom, tradeKnowledge, tradeMorale } from './realm';
+import { centerOf, drawFrom, fellLeft, growLand, landFrac, landMax, prepareSite } from './land';
+import { inParty, loseTraveller, paveRoutes, realmDay, setRevealHook, townWithRoom, tradeKnowledge, tradeMorale } from './realm';
+import { scoutDay } from './scouting';
 import { runCouncil } from './council';
 import { fxAdd, fxMul } from './decisions';
 import { resolveChoice, rollEvent } from './events';
-import { getMap, idx, inBounds, N4, tx, ty } from './map';
+import { getMap, idx, inBounds } from './map';
 import { checkObjectives } from './objectives';
-import { hash2, Rng } from './rng';
+import { Rng } from './rng';
 import { ageOf, eraOf, hasTech, makeSettler, seasonIndex } from './state';
 import type { BuildingId, FxEvent, GameState, JobId, LandLayer, LogEntry, Rates, ResourceId, Settler } from './types';
 import { F, JOBS, RESOURCES } from './types';
@@ -238,10 +237,17 @@ export function assignJobs(state: GameState) {
   const d = derived(state);
   const counts = Object.fromEntries(JOBS.map((j) => [j, 0])) as Record<JobId, number>;
   const idle: Settler[] = [];
+  const away = inParty(state);
   for (const s of state.settlers) {
     const age = ageOf(state, s);
     if (age < ADULT_AGE || age >= ELDER_AGE || !s.town) {
       s.job = null;
+      continue;
+    }
+    if (away.has(s.id)) {
+      // Out in the wilds: still a scout until they are home.
+      s.job = 'scout';
+      counts.scout++;
       continue;
     }
     if (s.job) {
@@ -257,11 +263,20 @@ export function assignJobs(state: GameState) {
   for (const j of JOBS) {
     const limit = Math.min(state.jobTargets[j], d.slots[j]);
     while (counts[j] < limit && idle.length) {
-      idle.pop()!.job = j;
+      (j === 'scout' ? nextScout(state, idle) : idle.pop()!).job = j;
       counts[j]++;
     }
   }
   return counts;
+}
+
+/** Scouts go out together: fill up a party in one settlement before starting another. */
+function nextScout(state: GameState, idle: Settler[]): Settler {
+  const per = new Map<number, number>();
+  for (const s of state.settlers) if (s.job === 'scout') per.set(s.town, (per.get(s.town) ?? 0) + 1);
+  let k = idle.findIndex((s) => (per.get(s.town) ?? 0) % PARTY_SIZE !== 0);
+  if (k < 0) k = idle.length - 1;
+  return idle.splice(k, 1)[0];
 }
 
 export interface PopSummary {
@@ -530,11 +545,8 @@ export function tick(state: GameState, ctx: TickContext) {
     if (left > 0 && state.routes.length) paveRoutes(state, left, rates);
   }
 
-  // --- exploration
-  {
-    const pts = out('scout', jobs.scout) * 1;
-    if (pts > 0) explore(state, ctx, rng, pts);
-  }
+  // --- exploration: scouting parties set out, march, camp and come home with their charts
+  scoutDay(state, ctx, rng, (s, cause) => killSettler(state, ctx, s, cause));
 
   // --- population: births, where there is a free home in the mother's settlement
   {
@@ -619,7 +631,7 @@ export function killSettler(state: GameState, ctx: TickContext, s: Settler, caus
   const i = state.settlers.indexOf(s);
   if (i < 0) return;
   state.settlers.splice(i, 1);
-  if (!s.town) loseTraveller(state, s.id);
+  loseTraveller(state, s.id);
   state.stats.deaths++;
   ctx.fx.push({ kind: 'death', settler: s.id });
   const age = Math.floor(ageOf(state, s));
@@ -640,100 +652,6 @@ export function addSettlers(state: GameState, ctx: TickContext, rng: Rng, n: num
 
 // ---------------------------------------------------------------- exploration
 
-interface FrontierMemo {
-  n: number;
-  set: Set<number>;
-  /** Frontier tiles by how close they are to where scouts are heading (lazily cleaned). */
-  heap: Heap | null;
-  anchors: number[][];
-  anchorKey: string;
-}
-
-const frontierMemo = new WeakMap<GameState, FrontierMemo>();
-
-/** Unexplored tiles next to explored ones, kept up to date as tiles are revealed. */
-export function frontier(state: GameState): Set<number> {
-  let m = frontierMemo.get(state);
-  if (m && m.n === state.stats.tilesExplored) return m.set;
-  const set = new Set<number>();
-  for (let y = 0; y < MAP_H; y++)
-    for (let x = 0; x < MAP_W; x++) {
-      const i = idx(x, y);
-      if (state.explored[i]) continue;
-      for (const [dx, dy] of N4) {
-        const nx = x + dx;
-        const ny = y + dy;
-        if (inBounds(nx, ny) && state.explored[idx(nx, ny)]) {
-          set.add(i);
-          break;
-        }
-      }
-    }
-  m = { n: state.stats.tilesExplored, set, heap: null, anchors: [], anchorKey: '' };
-  frontierMemo.set(state, m);
-  return set;
-}
-
-/** How attractive a frontier tile is to scouts (lower is better): near a marked spot, or any hearth. */
-function frontierScore(m: FrontierMemo, i: number) {
-  let dmin = Infinity;
-  for (const [ax, ay] of m.anchors) dmin = Math.min(dmin, Math.hypot(tx(i) - ax, ty(i) - ay));
-  return dmin + hash2(tx(i), ty(i), 77) * 2.5;
-}
-
-function frontierReveal(state: GameState, i: number) {
-  const m = frontierMemo.get(state);
-  if (!m || m.n !== state.stats.tilesExplored - 1) return;
-  m.n++;
-  m.set.delete(i);
-  const x = tx(i);
-  const y = ty(i);
-  for (const [dx, dy] of N4) {
-    if (!inBounds(x + dx, y + dy)) continue;
-    const j = idx(x + dx, y + dy);
-    if (state.explored[j] || m.set.has(j)) continue;
-    m.set.add(j);
-    m.heap?.push(j, frontierScore(m, j));
-  }
-}
-
-/** Where scouts head next: the unknown nearest the marked land, or nearest any of the realm's hearths. */
-function nextExploreTile(state: GameState): number | null {
-  const f = frontier(state);
-  if (!f.size) return null;
-  const m = frontierMemo.get(state)!;
-  const anchors = state.exploreTarget !== null ? [[tx(state.exploreTarget), ty(state.exploreTarget)]] : state.towns.map((t) => [t.x, t.y]);
-  const key = anchors.map((a) => a.join(',')).join(';');
-  if (!m.heap || key !== m.anchorKey) {
-    m.anchors = anchors;
-    m.anchorKey = key;
-    m.heap = new Heap();
-    for (const i of f) m.heap.push(i, frontierScore(m, i));
-  }
-  while (m.heap.size && !f.has(m.heap.peek())) m.heap.pop();
-  return m.heap.size ? m.heap.peek() : null;
-}
-
-function explore(state: GameState, ctx: TickContext, rng: Rng, pts: number) {
-  const map = getMap(state.seed);
-  state.exploreProgress += pts;
-  for (let guard = 0; guard < 20; guard++) {
-    const next = nextExploreTile(state);
-    if (next === null) {
-      state.exploreProgress = 0;
-      return;
-    }
-    const cost = EXPLORE_COST[map.terrain[next]];
-    if (state.exploreProgress < cost) return;
-    state.exploreProgress -= cost;
-    revealTile(state, ctx, rng, next);
-    if (state.exploreTarget !== null && state.explored[state.exploreTarget]) {
-      state.exploreTarget = null;
-      log(state, 'Your scouts have reached the marked lands.', 'info');
-    }
-  }
-}
-
 export function revealAround(state: GameState, ctx: TickContext, rng: Rng, x: number, y: number, r: number) {
   for (let yy = y - r; yy <= y + r; yy++)
     for (let xx = x - r; xx <= x + r; xx++) {
@@ -746,7 +664,6 @@ export function revealAround(state: GameState, ctx: TickContext, rng: Rng, x: nu
 export function revealTile(state: GameState, ctx: TickContext, rng: Rng, i: number) {
   state.explored[i] = 1;
   state.stats.tilesExplored++;
-  frontierReveal(state, i);
   const map = getMap(state.seed);
   const f = map.feature[i] as F;
   if (f === F.None || state.claimed.includes(i)) return;
@@ -799,5 +716,5 @@ function discover(state: GameState, ctx: TickContext, rng: Rng, i: number, f: F)
   ctx.fx.push({ kind: 'discover', tile: i });
 }
 
-// Pioneers and galleys reveal the land they pass the way scouts do, discoveries and all.
+// Pioneers, galleys and the charts scouts bring home reveal the land, discoveries and all.
 setRevealHook((state, ctx, i) => revealTile(state, ctx, new Rng((state.rng ^ (i * 2654435761)) | 0), i));
