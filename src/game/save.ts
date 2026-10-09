@@ -11,19 +11,24 @@ const PREFS = 'hearthlands.prefs.v1';
 export interface Prefs {
   sound: boolean;
   speed: number;
+  /** Show the elder's guide tips. */
+  tips: boolean;
 }
+
+const DEFAULT_PREFS: Prefs = { sound: true, speed: 1, tips: true };
 
 export function loadPrefs(): Prefs {
   try {
-    return { sound: true, speed: 1, ...JSON.parse(localStorage.getItem(PREFS) ?? '{}') };
+    return { ...DEFAULT_PREFS, ...JSON.parse(localStorage.getItem(PREFS) ?? '{}') };
   } catch {
-    return { sound: true, speed: 1 };
+    return { ...DEFAULT_PREFS };
   }
 }
 
-export function savePrefs(p: Prefs) {
+/** Update some preferences, keeping the rest. */
+export function savePrefs(p: Partial<Prefs>) {
   try {
-    localStorage.setItem(PREFS, JSON.stringify(p));
+    localStorage.setItem(PREFS, JSON.stringify({ ...loadPrefs(), ...p }));
   } catch {
     /* storage unavailable */
   }

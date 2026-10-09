@@ -52,6 +52,7 @@ export function newGame(seed: number, legacy = 0, now = Date.now()): GameState {
     lastSave: now,
     hunger: 0,
     cold: 0,
+    guide: [],
     stats: {
       births: 0,
       deaths: 0,

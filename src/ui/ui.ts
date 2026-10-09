@@ -27,11 +27,13 @@ import type { BuildingId, FxEvent, GameState, LogEntry, ResourceId } from '../ga
 import { F, RESOURCES } from '../game/types';
 import { sfx, setSoundEnabled, soundEnabled } from './audio';
 import { costEl, fmt, fmtRate, h, hideTip, img, RES_ICON, tip } from './dom';
+import { Guide } from './guide';
 import { BUILDING_ICON, Panels, resourceTip, seasonIcon } from './panels';
 import type { Game } from './types';
 
 export class UI {
   panels: Panels;
+  guide: Guide;
   private resEls = new Map<ResourceId, { el: HTMLElement; amt: HTMLElement; rate: HTMLElement; last: number }>();
   private lastUpdate = 0;
   private lastLog: LogEntry | null = null;
@@ -48,6 +50,7 @@ export class UI {
 
   constructor(private game: Game) {
     this.panels = new Panels(game);
+    this.guide = new Guide(game, this.panels);
     this.buildHud();
     this.bindGlobal();
   }
@@ -62,13 +65,16 @@ export class UI {
     this.inspectTile = null;
     this.choiceSig = '';
     this.buildResources();
+    this.panels.reset();
     this.panels.setTab('decide');
+    this.guide.attach(state);
     this.update(true);
   }
 
   showGameUi(on: boolean) {
     for (const id of ['hud', 'side', 'objective', 'zoom-ctl', 'side-toggle']) document.getElementById(id)!.classList.toggle('hidden', !on);
     if (!on) {
+      this.guide.hide();
       document.getElementById('inspector')!.classList.add('hidden');
       document.getElementById('choice')!.classList.add('hidden');
       document.getElementById('place-banner')!.classList.add('hidden');
@@ -185,6 +191,7 @@ export class UI {
     this.panels.update();
     this.updateObjective(s);
     this.updateChoice(s);
+    this.guide.update();
     this.updateInspector();
     this.updateBanner(s);
     this.checkLog(s);
@@ -680,6 +687,12 @@ export class UI {
       soundBtn.textContent = `Sound: ${soundEnabled() ? 'On' : 'Off'}`;
       this.game.save();
     });
+    const tipsLabel = () => `Elder's tips: ${this.guide.enabled ? 'On' : 'Off'}`;
+    const tipsBtn = h('button', { class: 'btn', title: 'Short tips that introduce each part of the game as it comes up' }, tipsLabel());
+    tipsBtn.addEventListener('click', () => {
+      this.guide.setEnabled(!this.guide.enabled);
+      tipsBtn.textContent = tipsLabel();
+    });
     const restart = h('button', { class: 'btn danger' }, 'Abandon this settlement');
     restart.addEventListener('click', () => {
       if (!restart.dataset.confirm) {
@@ -732,6 +745,7 @@ export class UI {
           'Export / import save',
         ),
         soundBtn,
+        tipsBtn,
         h(
           'button',
           {
@@ -811,7 +825,7 @@ export class UI {
           { class: 'howto' },
           h('p', null, 'Lead a band of eight wanderers from a single campfire to a thriving civilisation, and raise the Sunspire — a wonder for the ages.'),
           h('h3', null, '1 · You decide, the council acts'),
-          h('ul', null, h('li', null, 'The game runs by itself: your council assigns work, raises buildings and pursues discoveries every day — even while you are away.'), h('li', null, 'Your job is to set the direction in the Decide tab. Nothing ever waits for you, but good decisions make your people thrive.')),
+          h('ul', null, h('li', null, 'The game runs by itself: your council assigns work, raises buildings and pursues discoveries every day — even while you are away.'), h('li', null, 'Your job is to set the direction in the Decide tab. Nothing ever waits for you, but good decisions make your people thrive.'), h('li', null, 'New tabs and decisions open up as your settlement grows, and the elder explains each one when it appears. Tips can be turned off in the menu.')),
           h('h3', null, '2 · Choose your path'),
           h('ul', null, h('li', null, 'Start by choosing your people\u2019s Founding Way.'), h('li', null, 'When your settlement is ready for a new age, a Crossroads opens: pick one of three permanent paths to enter it. Five ages lead from Embers to Wonders.')),
           h('h3', null, '3 · Steer with focus and policies'),

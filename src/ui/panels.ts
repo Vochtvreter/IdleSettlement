@@ -17,6 +17,7 @@ import { ageOf, eraOf, seasonIndex, year } from '../game/state';
 import { buildMaterials, buildWork, careLevel, gathererCapacity, materialLimit, moraleTarget, popSummary, productivity, toolBonus } from '../game/sim';
 import { councilWish } from '../game/council';
 import { PIN_UNLOCK } from '../game/decisions';
+import { tabRevealed, type Tab } from '../game/reveal';
 import { buildDecide, decideSignature, pendingDecision } from './decide';
 import type { BuildingId, GameState, JobId, LogEntry, ResourceId, TechId } from '../game/types';
 import { JOBS } from '../game/types';
@@ -40,7 +41,6 @@ export const JOB_ICON: Record<JobId, string> = {
 
 export const BUILDING_ICON = (state: GameState, t: BuildingId) => (t === 'hut' ? (eraOf(state) >= 2 ? 'hut1' : 'hut0') : t === 'monument' ? 'shrine' : t);
 
-type Tab = 'decide' | 'people' | 'build' | 'research' | 'log';
 type Updater = () => void;
 
 const JOB_SOURCE: Partial<Record<JobId, [ResourceId, string][]>> = {
@@ -73,6 +73,9 @@ export class Panels {
   private updaters: Updater[] = [];
   private logFilter: 'all' | 'life' | 'discovery' | 'events' = 'all';
   private badges: Partial<Record<Tab, HTMLElement>> = {};
+  private tabBtns: Partial<Record<Tab, HTMLElement>> = {};
+  /** Tabs on show; null until the first update after a game is attached. */
+  private revealed: Set<Tab> | null = null;
 
   constructor(private game: Game) {
     this.body = document.getElementById('tab-body')!;
@@ -102,12 +105,20 @@ export class Panels {
         label,
         badge,
       );
+      this.tabBtns[id] = b;
       this.tabsEl.append(b);
     }
   }
 
+  /** Forget which tabs were on show (new game / load), so they do not all announce themselves. */
+  reset() {
+    this.revealed = null;
+  }
+
   setTab(t: Tab) {
+    if (!tabRevealed(this.game.state, t)) return;
     this.tab = t;
+    this.tabBtns[t]!.classList.remove('fresh');
     for (const el of this.tabsEl.querySelectorAll('.tab')) el.classList.toggle('active', (el as HTMLElement).dataset.tab === t);
     this.sig = '';
     this.body.scrollTop = 0;
@@ -147,7 +158,24 @@ export class Panels {
     for (const u of this.updaters) u();
   }
 
+  private updateTabs(s: GameState) {
+    const first = !this.revealed;
+    const revealed = this.revealed ?? new Set<Tab>();
+    for (const [id, btn] of Object.entries(this.tabBtns) as [Tab, HTMLElement][]) {
+      const on = tabRevealed(s, id);
+      btn.classList.toggle('hidden', !on);
+      if (on && !revealed.has(id)) {
+        revealed.add(id);
+        // A newly opened tab glows until it is visited.
+        if (!first) btn.classList.add('fresh');
+      }
+      if (!on) btn.classList.remove('fresh');
+    }
+    this.revealed = revealed;
+  }
+
   private updateBadges(s: GameState) {
+    this.updateTabs(s);
     const ready = s.council.research ? 0 : TECH_ORDER.filter((t) => !t.startsWith('era_') && techStatus(s, t).ok).length;
     const rb = this.badges.research!;
     rb.textContent = String(ready);

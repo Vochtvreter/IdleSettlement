@@ -195,6 +195,8 @@ export interface GameState {
   /** Sustained-shortage trackers (0..1) used for hunger/cold. */
   hunger: number;
   cold: number;
+  /** Guide tips already shown. Missing on saves from before the guide existed (treated as all seen). */
+  guide?: string[];
 }
 
 /** Transient, non-saved per-tick breakdowns for UI tooltips and visual effects. */

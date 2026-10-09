@@ -10,6 +10,13 @@ your settlement reaches milestones.
 A full playthrough takes roughly **25–40 minutes at normal speed** (2× and 5× speeds are available), depending on your
 choices, and there is a New Game+ "Legacy" loop afterwards.
 
+## A gentle start
+
+The game introduces itself one system at a time. A new settlement starts with only the Decide tab and a single
+choice, the Founding Way. The People, Build, Chronicle and Research tabs, Council Focus, policies, council settings
+and manual control each appear once they start to matter, and short tips from the elder explain each one as it opens
+up. Tips can be switched off from the menu.
+
 ## Decisions
 
 - **Crossroads (paths).** Choose your people's Founding Way at any time. When the settlement is ready for a new age
@@ -79,6 +86,8 @@ and is serving the unbuilt source. Switch **Source** to **GitHub Actions** and r
 src/game/      pure simulation — no DOM
   data.ts        tunable content: jobs, buildings, techs, eras
   decisions.ts   paths, focus, policies, council settings, milestones and their effects
+  reveal.ts      when each tab and section of the interface appears
+  guide.ts       the elder's tips that introduce each system
   council.ts     the automation that runs the settlement according to your decisions
   map.ts         seeded world generation
   sim.ts         the daily tick: production, consumption, construction, exploration, births, deaths, morale
