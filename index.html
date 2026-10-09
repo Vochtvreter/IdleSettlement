@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#0e0b16" />
+    <meta name="description" content="Hearthlands — an idle settlement saga. Lead a handful of wanderers from a lone campfire to a civilisation that raises the Sunspire." />
+    <title>Hearthlands — An Idle Settlement Saga</title>
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="map" aria-label="Settlement map"></canvas>
+
+      <header id="hud" class="hidden">
+        <div class="brand">
+          <div class="brand-flame" aria-hidden="true"></div>
+          <div class="brand-text">
+            <button id="settle-name" class="link-btn" title="Rename settlement"></button>
+            <div id="era-badge"></div>
+          </div>
+        </div>
+        <div id="resources"></div>
+        <div class="hud-right">
+          <div id="date"></div>
+          <div id="speed" role="group" aria-label="Game speed"></div>
+          <button id="menu-btn" class="icon-btn" title="Menu (Esc)">&#9776;</button>
+        </div>
+      </header>
+
+      <aside id="objective" class="panel hidden"></aside>
+      <aside id="side" class="panel hidden">
+        <nav id="tabs" role="tablist"></nav>
+        <div id="tab-body"></div>
+      </aside>
+      <button id="side-toggle" class="hidden" title="Toggle panel">&#9654;</button>
+      <div id="inspector" class="panel hidden"></div>
+      <div id="place-banner" class="hidden"></div>
+      <div id="choice" class="panel hidden"></div>
+      <div id="toasts"></div>
+      <div id="zoom-ctl" class="hidden">
+        <button id="zoom-in" class="icon-btn" title="Zoom in (+)">+</button>
+        <button id="zoom-out" class="icon-btn" title="Zoom out (-)">&minus;</button>
+        <button id="zoom-home" class="icon-btn" title="Centre on hearth (H)">&#8962;</button>
+      </div>
+      <div id="tooltip" role="tooltip"></div>
+      <div id="modal-root"></div>
+      <div id="title-screen"></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
