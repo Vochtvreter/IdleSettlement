@@ -4,8 +4,8 @@
  * chosen focus, policies and tweaks. It is deterministic so it also runs offline.
  */
 import { buildingAvailability, placeBuilding, research, setJobTarget, techStatus } from './actions';
-import { BUILDING_DEFS, MAP_H, MAP_W, TECH_DEFS, TECH_ORDER } from './data';
-import { choiceOf, nextPath, pathRequirements, tweak } from './decisions';
+import { BUILDING_DEFS, JOB_DEFS, MAP_H, MAP_W, TECH_DEFS, TECH_ORDER } from './data';
+import { choiceOf, fxMul, nextPath, pathRequirements, tweak } from './decisions';
 import { canAfford, canPlace, census, derived, invalidate, SPECIALTY_NAMES, type Derived, type Specialty } from './derived';
 import { blocked, catchmentAt, centerOf, dryLand, hearthOf, layerSum, prepNeeded, ringOf, sizeOf, tilesOf } from './land';
 import { getMap, idx, inBounds, N4, N8, tx, ty } from './map';
@@ -398,6 +398,14 @@ export function homeTown(state: GameState): { town: number; need: number } | nul
   return best;
 }
 
+/** Smiths the realm needs to make more tools than its workers wear out, with half again to put by. */
+export function smithsNeeded(state: GameState) {
+  const users = JOBS.filter((j) => JOB_DEFS[j].usesTools).reduce((sum, j) => sum + state.jobTargets[j], 0);
+  const wear = users * 0.006 * fxMul(state, 'toolWear');
+  const perSmith = Math.max(0.02, jobOutput(state, 'smith', 1, -1) * baseRate('smith'));
+  return Math.max(2, Math.ceil((wear * 1.5) / perSmith));
+}
+
 export function councilWish(state: GameState): Wish | null {
   const d = derived(state);
   const pop = state.settlers.length;
@@ -465,13 +473,30 @@ export function councilWish(state: GameState): Wish | null {
     if (w && !w.waiting) return w;
   }
   // 6. Woods felled bare or herds hunted thin: open a camp somewhere richer.
-  if (yieldEff(state, 'woodcutter') < 0.6 && state.res.wood < d.caps.wood * 0.5 && count(state, 'lumber') < 6) {
+  const camps = 6 + Math.floor(pop / 50);
+  if ((yieldEff(state, 'woodcutter') < 0.6 || state.res.wood < d.caps.wood * 0.25) && state.res.wood < d.caps.wood * 0.5 && count(state, 'lumber') < camps) {
     const w = wish('lumber');
     if (w && freshSite(state, 'lumber')) return w;
   }
   if (yieldEff(state, 'hunter') < 0.6 && count(state, 'lodge') < 4) {
     const w = wish('lodge');
     if (w && !w.waiting && freshSite(state, 'lodge')) return w;
+  }
+  // 6b. A great realm wears out its tools faster than a village: enough smiths to stay ahead of the
+  // wear with some to put by, and mines enough to feed them.
+  if (hasTech(state, 'bronze')) {
+    const need = smithsNeeded(state);
+    const smithies = count(state, 'smithy');
+    if (smithies * (BUILDING_DEFS.smithy.slots?.smith ?? 2) < need) {
+      const w = wish('smithy');
+      if (w && !w.waiting) return w;
+    }
+    const perMiner = Math.max(0.05, jobOutput(state, 'miner', 1, -1) * baseRate('miner') * Math.max(0.3, yieldEff(state, 'miner')));
+    const miners = Math.ceil((Math.min(need, smithies * (BUILDING_DEFS.smithy.slots?.smith ?? 2)) * 0.4) / perMiner);
+    if (state.res.ore < d.caps.ore * 0.5 && count(state, 'mine') * (BUILDING_DEFS.mine.slots?.miner ?? 3) < miners) {
+      const w = wish('mine');
+      if (w && !w.waiting) return w;
+    }
   }
   // 7. The focus plan.
   for (const [t, n] of PLANS[focusOf(state)]) {
@@ -715,6 +740,13 @@ function councilJobs(state: GameState) {
   if (sites) take('builder', Math.max(1, ps.adults * Math.max(tweak(state, 'builders') / 100, monument ? 0.3 : 0)));
 
   take('scholar', 1);
+
+  // Tools: smiths enough to stay ahead of the wear, and miners to feed them.
+  if (hasTech(state, 'bronze') && ps.adults >= 20) {
+    const smiths = take('smith', smithsNeeded(state));
+    const perMiner = Math.max(0.05, jobOutput(state, 'miner', 1, -1) * baseRate('miner') * Math.max(0.3, yieldEff(state, 'miner')));
+    if (smiths) take('miner', Math.ceil((smiths * 0.4) / perMiner));
+  }
 
   // Stock up for winter when there is room in the stores.
   if (!full && stock < reserve && season !== 3) fillFood(need * (1.35 + (focus === 'growth' ? 0.1 : 0)));

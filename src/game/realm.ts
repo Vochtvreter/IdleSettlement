@@ -1067,9 +1067,11 @@ function councilRealm(state: GameState, ctx: Ctx) {
   // Pioneers, when the realm is big enough to spare them.
   const cap = townCap(state);
   if (policy !== 'consolidate' && state.towns.length < cap && pop >= (policy === 'expand' ? 18 : 24) && state.day % 10 === 0 && state.hunger < 0.02) {
+    // From the settlement with the most people to spare, or failing that the next: once the home
+    // land is full, the way on is across the sea from a harbour town.
     const c = census(state);
-    const from = [...state.towns].sort((a, b) => (c.adults.get(b.id) ?? 0) - (c.adults.get(a.id) ?? 0))[0];
-    if (from && state.res.food > 80 + pop * 2) autoPioneers(state, ctx, from.id);
+    const from = [...state.towns].sort((a, b) => (c.adults.get(b.id) ?? 0) - (c.adults.get(a.id) ?? 0) || a.id - b.id);
+    if (state.res.food > 80 + pop * 2) for (const t of from.slice(0, 6)) if (pioneerStatus(state, t.id, harbourTiles(state, t.id).size > 0).ok && autoPioneers(state, ctx, t.id)) break;
   }
   // Galleys chart the seas now and then.
   if (hasTech(state, 'seafaring') && state.day % 60 === 0 && state.res.wood > 80) {

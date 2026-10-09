@@ -496,9 +496,9 @@ export const TECH_DEFS: Record<TechId, TechDef> = {
   plough: { name: 'Iron Plough', era: 3, cost: { knowledge: 3600, tools: 105 }, desc: 'Farmers +40%.' },
   mathematics: { name: 'Mathematics', era: 3, cost: { knowledge: 4800 }, desc: 'Builders +30%, knowledge +15%.' },
   faith: { name: 'Faith', era: 3, cost: { knowledge: 3360 }, desc: 'Unlocks Temples. Morale +5.' },
-  era_wonders: { name: 'Golden Age', era: 3, cost: { knowledge: 8400, tools: 280 }, requires: ['iron', 'mathematics'], minPop: 900, minTowns: 14, minTier: 4, advancesTo: 4, desc: 'A flourishing of art and ambition. Enter the Age of Wonders.' },
+  era_wonders: { name: 'Golden Age', era: 3, cost: { knowledge: 8400, tools: 280 }, requires: ['iron', 'mathematics'], minPop: 900, minTowns: 12, minTier: 4, advancesTo: 4, desc: 'A flourishing of art and ambition. Enter the Age of Wonders.' },
 
-  architecture: { name: 'Architecture', era: 4, cost: { knowledge: 60000 }, minTowns: 18, desc: 'The knowledge to raise the Sunspire, a wonder to outlast the ages.' },
+  architecture: { name: 'Architecture', era: 4, cost: { knowledge: 60000 }, minTowns: 16, desc: 'The knowledge to raise the Sunspire, a wonder to outlast the ages.' },
 };
 
 export const TECH_ORDER = Object.keys(TECH_DEFS) as TechId[];
