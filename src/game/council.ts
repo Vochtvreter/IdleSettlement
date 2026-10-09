@@ -11,7 +11,7 @@ import { blocked, catchmentAt, centerOf, dryLand, hearthOf, layerSum, prepNeeded
 import { getMap, idx, inBounds, N4, N8, tx, ty } from './map';
 import { townCalling, unpaved } from './realm';
 import { withSearch } from './scratch';
-import { baseRate, foodDemand, gathererCapacity, jobOutput, pastureYield, popSummary, yieldEff, type TickContext } from './sim';
+import { baseRate, foodDemand, gathererCapacity, jobOutput, materialLimit, pastureYield, popSummary, toolUsers, yieldEff, type TickContext } from './sim';
 import { eraOf, hasTech, seasonIndex } from './state';
 import type { Building, BuildingId, Cost, GameState, JobId, ResourceId, TechId } from './types';
 import { F, JOBS, T } from './types';
@@ -222,8 +222,8 @@ function bestTile(state: GameState, type: BuildingId, town?: number): number | n
   let bestScore = -Infinity;
   for (const i of d.terrTiles) {
     if (town !== undefined && d.townAt[i] !== town) continue;
-    // The great work rises in the capital.
-    if (type === 'monument' && d.townAt[i] !== capital) continue;
+    // The great work rises in the capital, unless a settlement is named.
+    if (type === 'monument' && town === undefined && d.townAt[i] !== capital) continue;
     const c = canPlace(state, type, i, d);
     if (!c.ok) continue;
     const sc = siteScore(state, type, i, c.mult, at, d);
@@ -376,6 +376,26 @@ const PLANS: Record<Focus, Plan> = {
   ],
 };
 
+/**
+ * Whether the realm is short of tools: the council keeps enough in the stores for most labourers to
+ * have one, plus what the next age, a pinned discovery or the Sunspire will ask for. Also how many
+ * forges that takes, and whether the forges would run short of ore.
+ */
+export function toolNeed(state: GameState, d: Derived = derived(state)) {
+  const users = toolUsers(state);
+  const path = nextPath(state);
+  const ahead = Math.max(path?.tech ? (TECH_DEFS[path.tech].cost.tools ?? 0) : 0, state.pin ? (TECH_DEFS[state.pin].cost.tools ?? 0) : 0);
+  const monument = d.sites.some((b) => b.type === 'monument');
+  const want = Math.min(d.caps.tools * 0.95, users * 0.75 + ahead + (monument ? 150 : 0));
+  // A forge's two smiths keep about a hundred labourers in tools.
+  const smithies = 1 + Math.ceil(users / (monument ? 50 : 90));
+  // Ore the forges would use, against what the mines can dig.
+  let dig = 0;
+  for (const g of d.slotGroups.miner) dig += g.count * g.mult;
+  const oreShort = d.slots.smith * 0.4 > dig * baseRate('miner') * Math.max(0.3, yieldEff(state, 'miner')) && state.res.ore < d.caps.ore * 0.5;
+  return { want, short: state.res.tools < want, smithies, oreShort };
+}
+
 /** The next building the council wants, and whether it is merely waiting for resources. */
 export interface Wish {
   type: BuildingId;
@@ -429,10 +449,14 @@ export function councilWish(state: GameState): Wish | null {
     const w = (tier >= 2 && hasTech(state, 'masonry') && wish('manor', town)) || (hasTech(state, 'masonry') && wish('house', town)) || wish('hut', town);
     if (w) return w;
   }
-  // 2. The great work.
+  // 2. The great work: in the capital, or in the greatest city when the capital has no room left for it.
   if (hasTech(state, 'architecture') && !count(state, 'monument')) {
-    const w = wish('monument');
-    if (w) return w;
+    const c = census(state);
+    const cities = state.towns.filter((t, k) => k > 0 && t.tier >= 3).sort((a, b) => (c.residents.get(b.id) ?? 0) - (c.residents.get(a.id) ?? 0) || a.id - b.id);
+    for (const t of [state.towns[0], ...cities]) {
+      const w = wish('monument', t.id);
+      if (w) return w;
+    }
   }
   // 3. Storage pressure.
   const full = (r: ResourceId) => state.res[r] >= d.caps[r] * 0.95;
@@ -444,12 +468,27 @@ export function councilWish(state: GameState): Wish | null {
     const w = wish('granary');
     if (w && !w.waiting) return w;
   }
-  // 4. Feed people with farms instead of foragers.
-  if (hasTech(state, 'agriculture')) {
-    const foragers = state.settlers.filter((s) => s.job === 'gatherer').length;
+  // 4. Feed people with farms instead of foragers, while the stores are not already full. (Spare hands
+  // forage too, but more fields would only grow food nobody can store.)
+  if (hasTech(state, 'agriculture') && state.res.food < d.caps.food * 0.85) {
+    const foragers = state.jobTargets.gatherer ?? 0;
     if (foragers > 4) {
       const w = wish('farm');
       if (w) return w;
+    }
+  }
+  // 4b. Forges enough to keep the labourers in tools, and mines to feed the forges.
+  if (hasTech(state, 'bronze')) {
+    const tools = toolNeed(state, d);
+    if (tools.short) {
+      if (tools.oreShort && count(state, 'mine') < Math.max(2, Math.ceil(count(state, 'smithy') * 1.5))) {
+        const w = wish('mine');
+        if (w && !w.waiting) return w;
+      }
+      if (count(state, 'smithy') < tools.smithies) {
+        const w = wish('smithy');
+        if (w && !w.waiting) return w;
+      }
     }
   }
   // 5. Each new settlement takes up the trade its land suggests: mines in ore-rich hills, fields on
@@ -490,6 +529,24 @@ export function councilWish(state: GameState): Wish | null {
     // A second camp or lodge only where the land is not already being worked.
     if ((t === 'lumber' || t === 'lodge') && count(state, t) >= 1 && !freshSite(state, t)) continue;
     return w;
+  }
+  // 7b. Hands to spare, foraging land that cannot feed them: give them work where the realm runs short,
+  // a quarry when stone is low, a camp when wood is, a mine or a forge. A realm grows its trades with its people.
+  if ((state.jobTargets.gatherer ?? 0) > gathererCapacity(state) + 4) {
+    const fill = (r: ResourceId) => state.res[r] / Math.max(1, d.caps[r]);
+    const needs: [BuildingId, number][] = [
+      ['quarry', fill('stone')],
+      ['lumber', fill('wood')],
+    ];
+    if (hasTech(state, 'mining')) needs.push(['mine', fill('ore')]);
+    if (hasTech(state, 'bronze')) needs.push(['smithy', state.res.tools / Math.max(1, toolNeed(state, d).want)]);
+    needs.sort((a, b) => a[1] - b[1]);
+    for (const [t, f] of needs) {
+      if (f > 0.75) break;
+      if (t === 'lumber' && !freshSite(state, 'lumber')) continue;
+      const w = wish(t);
+      if (w && !w.waiting) return w;
+    }
   }
   // 8. Late game: keep adding storage so the Sunspire's appetite can be met.
   if (hasTech(state, 'architecture') && count(state, 'storehouse') < 8 + eraOf(state) * 2) {
@@ -721,9 +778,23 @@ function councilJobs(state: GameState) {
   // Builders before storytellers: an unbuilt site helps no one.
   const sites = d.sites.length;
   const monument = d.sites.some((b) => b.type === 'monument');
-  if (sites) take('builder', Math.max(1, ps.adults * Math.max(tweak(state, 'builders') / 100, monument ? 0.3 : 0)));
+  if (sites) {
+    let want = ps.adults * (tweak(state, 'builders') / 100);
+    // The great work takes as many hands as there are materials to raise it with, and no more.
+    if (monument) want = Math.max(want, Math.min(ps.adults * 0.3, materialLimit(state, 'monument') / Math.max(0.1, jobOutput(state, 'builder', 1, -1))));
+    take('builder', Math.max(1, want));
+  }
 
   take('scholar', 1);
+
+  // Forges, when tools are short, as far as the ore will go; and miners to dig it.
+  if (hasTech(state, 'bronze')) {
+    const tools = toolNeed(state, d);
+    if (tools.short) {
+      if (state.res.ore < d.caps.ore * 0.8) take('miner', Math.ceil(d.slots.smith * 0.4 / Math.max(0.1, baseRate('miner'))));
+      take('smith', Math.min(d.slots.smith, Math.floor(state.res.ore / 2)));
+    }
+  }
 
   // Stock up for winter when there is room in the stores.
   if (!full && stock < reserve && season !== 3) fillFood(need * (1.35 + (focus === 'growth' ? 0.1 : 0)));

@@ -24,7 +24,7 @@ export const RESOURCE_DEFS: Record<ResourceId, ResourceDef> = {
   stone: { name: 'Stone', baseCap: 80, desc: 'Sturdy building material from quarries.' },
   hides: { name: 'Hides', baseCap: 40, desc: 'From hunting and pastures. Used for clothing and crafts.' },
   ore: { name: 'Ore', baseCap: 60, desc: 'Dug from mountain mines. Smiths forge it into tools.' },
-  tools: { name: 'Tools', baseCap: 40, desc: 'Boost labourers when in stock. Needed for great works.' },
+  tools: { name: 'Tools', baseCap: 40, desc: 'Each labourer with a tool works better. Tools wear out with use. Needed for great works.' },
   knowledge: { name: 'Knowledge', baseCap: Infinity, desc: 'Gathered by scholars and spent on discoveries.' },
 };
 

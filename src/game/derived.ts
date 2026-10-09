@@ -202,7 +202,11 @@ interface Memo {
   /** Adults in each settlement after the capital, as staffed for `d`. */
   staffed: number[];
   d: Derived | null;
+  /** Bumped whenever `d` is worked out afresh. */
+  gen: number;
 }
+
+let generation = 0;
 
 const memo = new WeakMap<GameState, Memo>();
 
@@ -266,6 +270,7 @@ export function derived(state: GameState): Derived {
       land: null,
       staffed: [],
       d: null,
+      gen: 0,
     };
     memo.set(state, m);
   }
@@ -277,8 +282,15 @@ export function derived(state: GameState): Derived {
   if (!m.d || !sameStaff(m, state)) {
     m.staffed = staffedNow(state);
     m.d = staff(state, m.land);
+    m.gen = ++generation;
   }
   return m.d;
+}
+
+/** A number that changes whenever `derived` is worked out afresh: a cheap way to key what depends on it. */
+export function derivedGen(state: GameState): number {
+  derived(state);
+  return memo.get(state)!.gen;
 }
 
 /** Forget what was worked out (the flood fills, keyed by exactly what they depend on, are kept). */

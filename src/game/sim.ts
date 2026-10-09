@@ -64,9 +64,29 @@ export function productivity(state: GameState) {
   return 0.8 + 0.4 * (state.morale / 100);
 }
 
+/** Jobs whose work goes better with a good tool to hand. */
+export const TOOL_JOBS: readonly JobId[] = JOBS.filter((j) => JOB_DEFS[j].usesTools);
+
+/** Days a tool lasts in use, on average. */
+export const TOOL_LIFE = 1 / 0.006;
+
+/** Workers at jobs that use tools: as many as the council (or you) has asked for. */
+export function toolUsers(state: GameState): number {
+  let n = 0;
+  for (const j of TOOL_JOBS) n += state.jobTargets[j] ?? 0;
+  return n;
+}
+
+/** Share of them with a tool to hand: each one in use takes one from the stores. */
+export function toolShare(state: GameState): number {
+  const users = toolUsers(state);
+  if (users <= 0) return state.res.tools >= 1 ? 1 : 0;
+  return Math.min(1, state.res.tools / users);
+}
+
+/** Output multiplier from tools, for the share of labourers who have them (iron tools are better). */
 export function toolBonus(state: GameState) {
-  if (state.res.tools < 1) return 1;
-  return hasTech(state, 'iron') ? 1.4 : 1.2;
+  return 1 + (hasTech(state, 'iron') ? 0.4 : 0.2) * toolShare(state);
 }
 
 /** Multiplier from techs for a job. */
@@ -482,8 +502,9 @@ export function tick(state: GameState, ctx: TickContext) {
   // --- consumption
   add(rates, 'cons', 'food', 'Eating', foodNeed);
   if (heatNeed) add(rates, 'cons', 'wood', 'Firewood', heatNeed);
-  const toolUsers = JOBS.filter((j) => JOB_DEFS[j].usesTools).reduce((s, j) => s + jobs[j], 0);
-  const toolWear = state.res.tools >= 1 ? toolUsers * 0.006 * fxMul(state, 'toolWear') : 0;
+  // Tools wear out as they are used: the ones in workers' hands, not those still on the shelves.
+  const inHand = Math.min(state.res.tools, TOOL_JOBS.reduce((s, j) => s + jobs[j], 0));
+  const toolWear = (inHand / TOOL_LIFE) * fxMul(state, 'toolWear');
   if (toolWear) add(rates, 'cons', 'tools', 'Wear', toolWear);
 
   // --- apply

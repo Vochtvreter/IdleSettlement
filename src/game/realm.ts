@@ -23,7 +23,7 @@ import {
   TRAFFIC_ROUTE,
   TRAFFIC_TRAIL,
 } from './data';
-import { census, canAfford, derived, invalidate, pay, recount, SPECIALTY_NAMES, type Derived } from './derived';
+import { census, canAfford, derived, derivedGen, invalidate, pay, recount, SPECIALTY_NAMES, type Derived } from './derived';
 import { choiceOf, fxMul } from './decisions';
 import { clearTile, Heap, hearthOf, landMax, layRoad, layTrail, tilesOf, townById } from './land';
 import { getMap, idx, inBounds, isSea, isWater, N4, N8, tx, ty } from './map';
@@ -1073,6 +1073,14 @@ export function townCap(state: GameState) {
   return TOWN_CAP[Math.min(eraOf(state), TOWN_CAP.length - 1)] + (choiceOf(state, 'expansion') === 'expand' ? 4 : 0);
 }
 
+/**
+ * Settlements whose pioneers found nowhere worth going, and when: they only look again once the known
+ * land or the settlements change. (Not saved: it only skips searches that would come to nothing, so a
+ * reloaded game plays out the same. No pioneers are on the road while it is consulted, so none have
+ * claimed land.)
+ */
+const noSites = new WeakMap<GameState, Map<number, string>>();
+
 /** The council's work beyond the capital: pioneers, voyages and trade routes. */
 function councilRealm(state: GameState, ctx: Ctx) {
   if (!state.council.build || state.day % 5 !== 0) return;
@@ -1080,10 +1088,25 @@ function councilRealm(state: GameState, ctx: Ctx) {
   const pop = state.settlers.length;
   // Pioneers, when the realm is big enough to spare them.
   const cap = townCap(state);
-  if (policy !== 'consolidate' && state.towns.length < cap && pop >= (policy === 'expand' ? 18 : 24) && state.day % 10 === 0 && state.hunger < 0.02) {
+  if (policy !== 'consolidate' && state.towns.length < cap && pop >= (policy === 'expand' ? 18 : 24) && state.day % 10 === 0 && state.hunger < 0.02 && state.res.food > 80 + pop * 2) {
+    // From the biggest settlements, and from any with a harbour to cross the sea from.
     const c = census(state);
-    const from = [...state.towns].sort((a, b) => (c.adults.get(b.id) ?? 0) - (c.adults.get(a.id) ?? 0))[0];
-    if (from && state.res.food > 80 + pop * 2) autoPioneers(state, ctx, from.id);
+    const byPeople = [...state.towns].sort((a, b) => (c.adults.get(b.id) ?? 0) - (c.adults.get(a.id) ?? 0) || a.id - b.id);
+    const ports = new Set(state.buildings.filter((b) => b.type === 'harbour' && b.done).map((b) => b.town));
+    const from = byPeople.filter((t, k) => k < 3 || ports.has(t.id));
+    let memo = noSites.get(state);
+    if (!memo) noSites.set(state, (memo = new Map()));
+    const key = `${derivedGen(state)}:${state.stats.tilesExplored}`;
+    for (const t of from) {
+      if (!pioneerStatus(state, t.id).ok || memo.get(t.id) === key) continue;
+      const sites = findSites(state, t.id).filter((s) => s.value >= 20);
+      if (!sites.length) {
+        memo.set(t.id, key);
+        continue;
+      }
+      const site = sites.find((s) => pioneerStatus(state, t.id, s.sea).ok);
+      if (site && launchPioneers(state, ctx, t.id, site).ok) break;
+    }
   }
   // Galleys chart the seas now and then.
   if (hasTech(state, 'seafaring') && state.day % 60 === 0 && state.res.wood > 80) {
