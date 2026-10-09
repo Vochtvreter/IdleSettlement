@@ -1,5 +1,5 @@
 import { MAP_H, MAP_W } from '../game/data';
-import { landMax, wooded } from '../game/land';
+import { landMax, tilesOf, wooded } from '../game/land';
 import { getMap, idx, inBounds, isWater, N8, tx, ty } from '../game/map';
 import type { GameState } from '../game/types';
 import { T } from '../game/types';
@@ -13,7 +13,7 @@ let cacheKey = '';
 let cost = new Float32Array(MAP_W * MAP_H);
 
 function prepare(state: GameState) {
-  const key = `${state.seed}:${state.roads.length}:${state.buildings.length}:${state.buildings.filter((b) => b.done).length}:${state.landEpoch >> 3}`;
+  const key = `${state.seed}:${state.roads.length}:${state.trails.length}:${state.graded.length}:${state.buildings.length}:${state.buildings.filter((b) => b.done).length}:${state.landEpoch >> 3}`;
   if (key === cacheKey) return;
   cacheKey = key;
   cache.clear();
@@ -27,14 +27,18 @@ function prepare(state: GameState) {
     else if (t === T.Hills) cost[i] = 1.4;
     else cost[i] = wood[i] && wooded(state, i) ? 1.6 : 1;
   }
+  for (const i of state.graded) cost[i] = 1;
+  // Trails cross fords and mountain passes, slower than a road.
+  for (const i of state.trails) cost[i] = 0.7;
   for (const i of state.roads) cost[i] = 0.4;
-  const h = state.buildings.find((b) => b.type === 'campfire')!;
-  for (let dy = -1; dy <= 1; dy++)
-    for (let dx = -1; dx <= 1; dx++) if (inBounds(h.x + dx, h.y + dy) && isFinite(cost[idx(h.x + dx, h.y + dy)])) cost[idx(h.x + dx, h.y + dy)] = 0.4;
+  for (const h of state.buildings) {
+    if (h.type !== 'campfire') continue;
+    for (let dy = -1; dy <= 1; dy++)
+      for (let dx = -1; dx <= 1; dx++) if (inBounds(h.x + dx, h.y + dy) && isFinite(cost[idx(h.x + dx, h.y + dy)])) cost[idx(h.x + dx, h.y + dy)] = 0.4;
+  }
   for (const b of state.buildings) {
-    const i = idx(b.x, b.y);
-    if (b.type === 'bridge') cost[i] = b.done ? 0.4 : Infinity;
-    else if (b.type !== 'campfire') cost[i] = 3;
+    if (b.type === 'bridge') cost[idx(b.x, b.y)] = b.done ? 0.4 : Infinity;
+    else if (b.type !== 'campfire') for (const i of tilesOf(b)) cost[i] = 3;
   }
 }
 

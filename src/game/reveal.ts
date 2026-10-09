@@ -8,7 +8,7 @@ import type { GameState } from './types';
  * so a new player meets one system at a time. Every check is a pure function of the
  * game state and only ever turns on as the settlement progresses.
  */
-export type Tab = 'decide' | 'people' | 'build' | 'research' | 'log';
+export type Tab = 'decide' | 'people' | 'build' | 'research' | 'realm' | 'log';
 
 export function tabRevealed(s: GameState, t: Tab): boolean {
   switch (t) {
@@ -20,6 +20,8 @@ export function tabRevealed(s: GameState, t: Tab): boolean {
       return s.buildings.some((b) => b.type !== 'campfire' && b.done) || s.objective > 0 || !s.council.build;
     case 'research':
       return s.techs.length > 0 || s.objective > 1 || !s.council.research;
+    case 'realm':
+      return s.techs.includes('scouting') || s.towns.length > 1 || s.expeditions.length > 0;
     case 'log':
       return s.objective > 0;
   }

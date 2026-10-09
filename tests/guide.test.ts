@@ -6,9 +6,9 @@ import { emptyRates, tick, type TickContext } from '../src/game/sim';
 import { newGame } from '../src/game/state';
 import { decider } from './autoplayer';
 
-const TABS: Tab[] = ['decide', 'people', 'build', 'research', 'log'];
+const TABS: Tab[] = ['decide', 'people', 'build', 'research', 'realm', 'log'];
 /** Tips that only appear if something happens (an event, or something going wrong). */
-const CONTEXTUAL = new Set(['hunger', 'cold', 'event', 'land']);
+const CONTEXTUAL = new Set(['hunger', 'cold', 'event', 'land', 'prep', 'pioneers', 'realm', 'seafaring', 'trade']);
 
 describe('a new player meets one system at a time', () => {
   it('starts with only the Decide tab and the Founding Way', () => {
@@ -41,7 +41,8 @@ describe('a new player meets one system at a time', () => {
       ctx.fx.length = 0;
       tick(s, ctx);
     }
-    expect(TABS.every((t) => tabRevealed(s, t))).toBe(true);
+    // The Realm tab opens later, once pioneers can set out.
+    expect(TABS.filter((t) => t !== 'realm').every((t) => tabRevealed(s, t))).toBe(true);
     expect(focusRevealed(s) && manualRevealed(s)).toBe(true);
     for (const g of GUIDE) if (!CONTEXTUAL.has(g.id)) expect(s.guide, g.id).toContain(g.id);
     expect(shown.slice(0, 2)).toEqual(['welcome', 'way']);

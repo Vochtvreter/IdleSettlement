@@ -6,17 +6,20 @@ import {
   DAYS_PER_YEAR,
   ERAS,
   FEATURE_NAMES,
+  BIOMES,
   JOB_DEFS,
   MAP_H,
   MAP_W,
   RESOURCE_DEFS,
+  terrainName,
+  TIERS,
   SEASONS,
   TECH_DEFS,
   TECH_ORDER,
-  TERRAIN_NAMES,
 } from '../game/data';
-import { buildingMult, canPlace, derived } from '../game/derived';
-import { isGreen, landMax, layerSum, LIFE_FLOOR, wooded } from '../game/land';
+import { buildingMult, buildingOn, canPlace, census, derived } from '../game/derived';
+import { fellLeft, isGreen, landMax, layerSum, LIFE_FLOOR, prepNeeded, siteStage, sizeOf, wooded } from '../game/land';
+import { nextTierNeeds, siteCalling, siteProfile, siteValues, townTitle } from '../game/realm';
 import { getMap, tx, ty } from '../game/map';
 import { objectiveProgress } from '../game/objectives';
 import { exportSave, importSave, type OfflineReport } from '../game/save';
@@ -73,7 +76,7 @@ export class UI {
   }
 
   showGameUi(on: boolean) {
-    for (const id of ['hud', 'side', 'objective', 'zoom-ctl', 'side-toggle']) document.getElementById(id)!.classList.toggle('hidden', !on);
+    for (const id of ['hud', 'side', 'objective', 'zoom-ctl', 'side-toggle', 'minimap']) document.getElementById(id)!.classList.toggle('hidden', !on);
     if (!on) {
       this.guide.hide();
       document.getElementById('inspector')!.classList.add('hidden');
@@ -336,8 +339,9 @@ export class UI {
     const x = tx(tile);
     const y = ty(tile);
     const explored = !!s.explored[tile];
-    const b = s.buildings.find((bb) => bb.x === x && bb.y === y);
+    const b = buildingOn(s, tile);
     const d = derived(s);
+    const biome = map.biome[tile] as keyof typeof BIOMES;
     const parts: (HTMLElement | null)[] = [];
     const sticky = tile === this.selected && this.inspectTile === null;
     if (!explored) {
@@ -346,8 +350,24 @@ export class UI {
     } else if (b) {
       const def = BUILDING_DEFS[b.type];
       const p = b.done ? 1 : b.progress / buildWork(s, b.type);
-      parts.push(h('div', { class: 'ih' }, img(BUILDING_ICON(s, b.type), 3), h('div', null, h('div', { class: 'tt' }, def.name), h('div', { class: 'ts' }, b.done ? TERRAIN_NAMES[map.terrain[tile]] : `Under construction · ${Math.round(p * 100)}%`))));
-      parts.push(h('div', { class: 'desc' }, def.desc));
+      const town = s.towns.find((t) => t.id === b.town);
+      const stage = siteStage(s, b);
+      const stageText = stage === 'felling' ? 'Felling the trees on the site' : stage === 'levelling' ? 'Levelling the rock' : `Under construction · ${Math.round(p * 100)}%`;
+      const title = b.type === 'campfire' && town ? town.name : def.name;
+      const sub = b.type === 'campfire' && town ? `${townTitle(s, town)} · ${BIOMES[biome].name}` : b.done ? `${terrainName(map.terrain[tile], biome)}${town && s.towns.length > 1 ? ` · ${town.name}` : ''}` : stageText;
+      parts.push(h('div', { class: 'ih' }, img(BUILDING_ICON(s, b.type), 3), h('div', null, h('div', { class: 'tt' }, title), h('div', { class: 'ts' }, sub))));
+      if (b.type === 'campfire' && town) {
+        const c = census(s);
+        const info = d.towns.get(town.id);
+        parts.push(h('div', { class: 'row' }, 'People', h('b', null, `${c.residents.get(town.id) ?? 0} / ${info?.housing ?? 0} homes`)));
+        parts.push(h('div', { class: 'row' }, 'Buildings', h('b', null, String(info?.buildings ?? 0))));
+        const needs = nextTierNeeds(s, town);
+        if (town.tier + 1 < TIERS.length) parts.push(h('div', { class: 'desc' }, `To become a ${TIERS[town.tier + 1].name.toLowerCase()}: ${needs.length ? needs.join(', ') : 'ready'}.`));
+      } else parts.push(h('div', { class: 'desc' }, def.desc));
+      if (!b.done && (b.prepTotal ?? 0) > 0) {
+        const left = fellLeft(s, b) + (b.prep ?? 0);
+        parts.push(h('div', { class: 'row' }, 'Site preparation', h('b', null, left > 0.01 ? `${Math.round((1 - left / b.prepTotal!) * 100)}%` : 'done')));
+      }
       if (def.housing) parts.push(h('div', { class: 'row' }, 'Housing', h('b', null, String(def.housing))));
       for (const [j, n] of Object.entries(def.slots ?? {})) parts.push(h('div', { class: 'row' }, `${JOB_DEFS[j as keyof typeof JOB_DEFS].name} slots`, h('b', null, String(n))));
       const mult = buildingMult(s, b);
@@ -390,7 +410,9 @@ export class UI {
       const f = map.feature[tile];
       const claimed = s.claimed.includes(tile);
       const fname = f && !((f === F.Tribe || f === F.Cache) && claimed) ? FEATURE_NAMES[f] : '';
-      parts.push(h('div', { class: 'ih' }, img(fname ? (f === F.Ore ? 'i_ore' : f === F.Berries ? 'berries' : f === F.Ruins ? 'ruins' : f === F.Grove ? 'grove' : 'i_star') : 'i_house', 3), h('div', null, h('div', { class: 'tt' }, fname || TERRAIN_NAMES[t]), h('div', { class: 'ts' }, `${fname ? TERRAIN_NAMES[t] + ' · ' : ''}${d.territory[tile] ? 'Your territory' : 'Wilderness'} · ${x}, ${y}`))));
+      const tname = terrainName(t, biome);
+      const owner = d.territory[tile] ? s.towns.find((tt) => tt.id === d.townAt[tile]) : undefined;
+      parts.push(h('div', { class: 'ih' }, img(fname ? (f === F.Ore ? 'i_ore' : f === F.Berries ? 'berries' : f === F.Ruins ? 'ruins' : f === F.Grove ? 'grove' : 'i_star') : 'i_house', 3), h('div', null, h('div', { class: 'tt' }, fname || tname), h('div', { class: 'ts' }, `${fname ? tname + ' · ' : ''}${BIOMES[biome].name} · ${owner ? (s.towns.length > 1 ? owner.name : 'Your territory') : 'Wilderness'} · ${x}, ${y}`))));
       const featureDesc: Record<number, string> = {
         [F.Berries]: 'Berry thickets inside your territory let more gatherers work efficiently.',
         [F.Game]: 'Hunting lodges within 3 tiles get +30% per herd. Hunted hard, a herd dwindles and takes years to recover.',
@@ -402,8 +424,23 @@ export class UI {
       if (fname && featureDesc[f]) parts.push(h('div', { class: 'desc' }, featureDesc[f]));
       parts.push(...this.tileRows(s, tile));
       if (this.game.view.placing) {
-        const c = canPlace(s, this.game.view.placing, tile);
-        parts.push(h('div', { class: 'row' }, BUILDING_DEFS[this.game.view.placing].name, h('b', { style: c.ok ? '' : 'color:var(--bad)' }, c.ok ? (c.mult > 1.001 ? `OK · +${Math.round((c.mult - 1) * 100)}% bonus` : 'OK') : c.reason)));
+        const type = this.game.view.placing;
+        const c = canPlace(s, type, tile);
+        parts.push(h('div', { class: 'row' }, BUILDING_DEFS[type].name, h('b', { style: c.ok ? '' : 'color:var(--bad)' }, c.ok ? (c.mult > 1.001 ? `OK · +${Math.round((c.mult - 1) * 100)}% bonus` : 'OK') : c.reason)));
+        if (c.ok) {
+          const need = prepNeeded(s, type, x, y);
+          const [w, hh] = sizeOf(type);
+          if (need.fell > 0.01 || need.level > 0.01)
+            parts.push(h('div', { class: 'desc' }, `Before building: ${[need.fell > 0.01 ? `fell ${Math.round(need.wood)} timber` : '', need.level > 0.01 ? `level ${need.level >= 30 ? 'a mountainside' : 'the rocky ground'} (+${Math.round(need.stone)} stone)` : ''].filter(Boolean).join(', then ')}. About ${Math.round(need.fell + need.level)} work in all.`));
+          else if (w > 1 || hh > 1) parts.push(h('div', { class: 'desc' }, `Covers ${w}×${hh} tiles of clear ground.`));
+        }
+      } else if (!d.territory[tile] && s.techs.includes('scouting')) {
+        // What pioneers would make of this place.
+        const v = siteValues(s.seed)[tile];
+        if (v > 0) {
+          const p = siteProfile(s.seed, tile);
+          parts.push(h('div', { class: 'row' }, 'As a home for pioneers', h('b', null, `${Math.round(v)} · ${siteCalling(p)}${p.water ? '' : ', no fresh water'}`)));
+        }
       }
     }
     el.replaceChildren(...parts.filter(Boolean) as HTMLElement[]);
@@ -885,13 +922,15 @@ export class UI {
           h('h3', null, '4 · Survive the seasons'),
           h('ul', null, h('li', null, 'Winter brings little food and bitter cold. The council stockpiles; raise the winter reserve if people go hungry.')),
           h('h3', null, '5 · Explore and build'),
-          h('ul', null, h('li', null, 'Click any dark area of the map to send scouts there. Ruins, caches, wanderer camps and sacred groves await.'), h('li', null, 'Want a building somewhere specific? Commission it in the Build tab and click a glowing tile.'), h('li', null, 'Raise the Sunspire to win. Events and choices pop up along the way; they decide themselves if you ignore them.')),
+          h('ul', null, h('li', null, 'Click any dark area of the map to send scouts there. Ruins, caches, wanderer camps and sacred groves await.'), h('li', null, 'Want a building somewhere specific? Commission it in the Build tab and click a glowing tile. Any land will do: forest is felled and rock levelled first, which takes time on a mountainside.'), h('li', null, 'Raise the Sunspire to win. Events and choices pop up along the way; they decide themselves if you ignore them.')),
+          h('h3', null, '6 · Grow a realm'),
+          h('ul', null, h('li', null, 'Pioneers blaze trails to the best land your scouts have found and found new settlements. Each grows from a camp into a village, town, city and metropolis, and takes up the trade its land suggests.'), h('li', null, 'With a harbour, galleys chart the seas and carry colonists to other lands and climates. Trade routes by cart or galley join it all together.'), h('li', null, 'The Realm tab lists your settlements, pioneers and routes. The minimap shows the known world: click it to look anywhere.')),
           h('h3', null, 'Controls'),
           h(
             'ul',
             null,
             h('li', null, 'Drag to pan · scroll / pinch to zoom · ', h('span', { class: 'kbd' }, 'WASD'), ' pan'),
-            h('li', null, h('span', { class: 'kbd' }, 'Space'), ' pause · ', h('span', { class: 'kbd' }, '1'), h('span', { class: 'kbd' }, '2'), h('span', { class: 'kbd' }, '3'), ' speed · ', h('span', { class: 'kbd' }, 'H'), ' home · ', h('span', { class: 'kbd' }, 'Esc'), ' cancel / menu'),
+            h('li', null, h('span', { class: 'kbd' }, 'Space'), ' pause · ', h('span', { class: 'kbd' }, '1'), h('span', { class: 'kbd' }, '2'), h('span', { class: 'kbd' }, '3'), ' speed · ', h('span', { class: 'kbd' }, 'H'), ' home · ', h('span', { class: 'kbd' }, 'M'), ' realm · ', h('span', { class: 'kbd' }, 'Esc'), ' cancel / menu'),
             h('li', null, 'Shift-click: commission several buildings in a row'),
           ),
           h('p', { style: 'color:var(--muted);font-size:13px' }, 'Your game saves automatically. While you are away, time passes at half speed (up to 12 years).'),
@@ -936,6 +975,7 @@ export class UI {
       else if (e.key === 'b' || e.key === 'B') this.panels.setTab('build');
       else if (e.key === 'r' || e.key === 'R') this.panels.setTab('research');
       else if (e.key === 'c' || e.key === 'C') this.panels.setTab('log');
+      else if (e.key === 'm' || e.key === 'M') this.panels.setTab('realm');
       this.update(true);
     });
     window.addEventListener('keyup', (e) => (this.shift = e.shiftKey));

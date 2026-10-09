@@ -11,7 +11,7 @@ import { clearSave, hasSave, loadGame, loadPrefs, offlineDays, saveGame, savePre
 import { emptyRates, tick, type TickContext } from './game/sim';
 import { eraOf, newGame, year } from './game/state';
 import type { BuildingId, FxEvent, GameState, Rates } from './game/types';
-import { MapView } from './render/view';
+import { MapView, zoomFor } from './render/view';
 import { setSoundEnabled, sfx, soundEnabled } from './ui/audio';
 import { h, initTooltips } from './ui/dom';
 import type { Game } from './ui/types';
@@ -56,7 +56,7 @@ class GameApp implements Game {
     this.ui = new UI(this);
     initTooltips();
     this.view.resetFor(this.state);
-    this.view.setZoom(window.innerWidth < 700 ? 2 : 4);
+    this.view.setZoom(window.innerWidth < 700 ? zoomFor(2) : zoomFor(4));
 
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
@@ -150,7 +150,7 @@ class GameApp implements Game {
     this.startPlacing(null);
     this.state = loadGame() ?? newGame(randomSeed());
     this.view.resetFor(this.state);
-    this.view.setZoom(window.innerWidth < 700 ? 2 : 4);
+    this.view.setZoom(window.innerWidth < 700 ? zoomFor(2) : zoomFor(4));
     this.showTitle();
   }
 
@@ -162,7 +162,7 @@ class GameApp implements Game {
     this.paused = false;
     this.view.placing = null;
     this.view.resetFor(st);
-    this.view.setZoom(window.innerWidth < 700 ? 2 : 3);
+    this.view.setZoom(window.innerWidth < 700 ? zoomFor(2) : zoomFor(3));
     this.previewRates();
     this.ui.showGameUi(true);
     this.ui.attach(st);
@@ -258,6 +258,7 @@ class GameApp implements Game {
         h('div', { class: 'save-info' }, `${saved.name} · Year ${year(saved.day)} · ${ERAS[eraOf(saved)].name} · ${saved.settlers.length} people${saved.victory ? ' · ★' : ''}`),
       );
     }
+    if (!saved && hasSave()) btns.append(h('div', { class: 'save-info' }, 'Your earlier settlement was made on the old, smaller world and cannot continue in this one.'));
     const newBtn = h('button', { class: 'btn big' + (saved ? '' : ' primary') }, 'New Settlement');
     newBtn.addEventListener('click', () => {
       sfx('click');
@@ -308,6 +309,11 @@ const app = new GameApp();
 if (DEV) {
   // Handy hooks for testing and screenshots.
   (window as unknown as Record<string, unknown>).hearth = app;
+  // Fast-forward: hearth.skip(400) runs 400 days at once (the council runs everything).
+  (window as unknown as Record<string, unknown>).skip = (days: number) => {
+    for (let i = 0; i < days && !app.state.victory; i++) tick(app.state, { fx: [] });
+    app.changed();
+  };
   window.addEventListener('keydown', (e) => {
     if (e.key === '4') app.setSpeed(20);
   });

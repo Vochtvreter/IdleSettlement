@@ -1,3 +1,5 @@
+import { ART2 } from './art2';
+
 /**
  * Hand-authored pixel art. Each sprite is a list of rows; each character maps to a palette colour.
  * '.' is transparent. Sprites are rasterised once into canvases and cached.
@@ -78,7 +80,7 @@ export function sprite(name: string, overrides?: Record<string, string>): HTMLCa
   const key = overrides ? name + JSON.stringify(overrides) : name;
   let c = cache.get(key);
   if (!c) {
-    const rows = ART[name];
+    const rows = ART[name] ?? ART2[name];
     if (!rows) throw new Error('Unknown sprite ' + name);
     c = raster(rows, overrides ? { ...PAL, ...overrides } : PAL);
     cache.set(key, c);

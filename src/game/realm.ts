@@ -345,6 +345,8 @@ export function findSites(state: GameState, fromTown: number, opts: { sea?: bool
   // Expeditions under way have claimed their destinations.
   const claimed = state.expeditions.filter((e) => e.kind === 'settle').map((e) => e.path[e.path.length - 1]);
   const biomesHeld = new Set(state.towns.map((t) => map.biome[idx(t.x, t.y)]));
+  // Pioneers are drawn to riches the realm does not have yet: ore when it has only fields, the sea when it has none.
+  const callingsHeld = new Set(state.towns.map((t) => siteCalling(siteProfile(state.seed, idx(t.x, t.y)))));
   const out: SiteChoice[] = [];
   const closed = new Uint8Array(n);
   while (heap.size) {
@@ -358,7 +360,7 @@ export function findSites(state: GameState, fromTown: number, opts: { sea?: bool
       let v = values[i];
       if (!biomesHeld.has(map.biome[i])) v += 5;
       if (map.island[i] !== map.island[start]) v += 3;
-      out.push({ tile: i, path: [], cost: di, value: v, score: v - di * 0.11, sea: false });
+      out.push({ tile: i, path: [], cost: di, value: v, score: v - di * 0.09, sea: false });
     }
     const x = tx(i);
     const y = ty(i);
@@ -390,7 +392,18 @@ export function findSites(state: GameState, fromTown: number, opts: { sea?: bool
     }
   }
   out.sort((a, b) => b.score - a.score || a.tile - b.tile);
-  const best = out.slice(0, opts.limit ?? 5);
+  for (const c of out.slice(0, 40))
+    if (!callingsHeld.has(siteCalling(siteProfile(state.seed, c.tile)))) {
+      c.value += 4;
+      c.score += 4;
+    }
+  out.sort((a, b) => b.score - a.score || a.tile - b.tile);
+  // Keep the choices apart from each other.
+  const best: SiteChoice[] = [];
+  for (const c of out) {
+    if (best.length >= (opts.limit ?? 5)) break;
+    if (best.every((o) => Math.hypot(tx(o.tile) - tx(c.tile), ty(o.tile) - ty(c.tile)) >= 6)) best.push(c);
+  }
   for (const s of best) {
     const path: number[] = [];
     for (let k = s.tile; k >= 0; k = prev[k]) path.push(k);
@@ -782,19 +795,23 @@ export function tradeMorale(state: GameState) {
 export function paveRoutes(state: GameState, work: number, rates?: Rates): number {
   let left = work;
   for (const r of state.routes) {
-    if (r.kind !== 'land') continue;
+    if (r.kind !== 'land' || left <= 0) continue;
     const trails = new Set(state.trails);
-    while (left >= PAVE_WORK && r.paved < r.path.length) {
+    while (left > 0 && r.paved < r.path.length) {
       const i = r.path[r.paved];
       if (!trails.has(i)) {
         r.paved++;
         continue;
       }
       if (state.res.stone < PAVE_STONE) return work - left;
+      const use = Math.min(left, PAVE_WORK - (r.work ?? 0));
+      r.work = (r.work ?? 0) + use;
+      left -= use;
+      if (r.work < PAVE_WORK - 1e-9) break;
+      r.work = 0;
       state.res.stone -= PAVE_STONE;
       if (rates) rates.cons.stone['Paving'] = (rates.cons.stone['Paving'] ?? 0) + PAVE_STONE;
       layRoad(state, [i]);
-      left -= PAVE_WORK;
       r.paved++;
     }
   }

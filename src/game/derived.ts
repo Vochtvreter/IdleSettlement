@@ -55,16 +55,17 @@ export const SPECIALTY_NAMES: Record<Specialty, string> = {
   temple: 'Temple',
 };
 
+/** What each workplace says about a settlement's trade. Fields are everywhere, so they count for less. */
 const SPECIALTY_OF: Partial<Record<BuildingId, [Specialty, number]>> = {
-  farm: ['farming', 1],
-  granary: ['farming', 0.5],
-  pasture: ['herding', 1.2],
-  lumber: ['timber', 1],
-  lodge: ['hunting', 1],
-  mine: ['mining', 1.5],
-  quarry: ['quarrying', 1],
+  farm: ['farming', 0.55],
+  granary: ['farming', 0.25],
+  pasture: ['herding', 1.3],
+  lumber: ['timber', 1.2],
+  lodge: ['hunting', 1.3],
+  mine: ['mining', 1.8],
+  quarry: ['quarrying', 1.2],
   harbour: ['port', 2.5],
-  smithy: ['crafts', 1.2],
+  smithy: ['crafts', 1.3],
   library: ['learning', 1.2],
   shrine: ['temple', 1],
 };

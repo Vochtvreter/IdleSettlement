@@ -190,6 +190,8 @@ export interface TradeRoute {
   opened: number;
   /** Land routes: how many tiles of the trail have been paved into road so far. */
   paved: number;
+  /** Work put into paving the next tile. */
+  work?: number;
 }
 
 export interface LogEntry {

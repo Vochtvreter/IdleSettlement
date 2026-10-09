@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { placeBuilding, setJobTarget } from '../src/game/actions';
+import { placeBuilding, prioritise, setJobTarget, worksQueue } from '../src/game/actions';
 import { bridgeTile } from '../src/game/council';
-import { DAYS_PER_YEAR, MAP_H, MAP_W } from '../src/game/data';
+import { BUILDING_DEFS, DAYS_PER_YEAR, MAP_H, MAP_W } from '../src/game/data';
 import { canPlace, derived, invalidate } from '../src/game/derived';
-import { catchmentAt, drawFrom, growLand, landMax, LIFE_FLOOR, wooded } from '../src/game/land';
+import { catchmentAt, drawFrom, footprint, growLand, landMax, LIFE_FLOOR, prepNeeded, ringOf, siteStage, sizeOf, wooded } from '../src/game/land';
 import { getMap, idx, inBounds, isWater, N4, tx, ty } from '../src/game/map';
-import { deserialize, serialize } from '../src/game/save';
+import { deserialize, isLegacySave, serialize } from '../src/game/save';
 import { emptyRates, tick, type TickContext } from '../src/game/sim';
 import { newGame } from '../src/game/state';
 import type { GameState } from '../src/game/types';
@@ -33,47 +33,117 @@ function build(s: GameState, type: Parameters<typeof canPlace>[1], ok: (i: numbe
 }
 
 describe('occupied land', () => {
-  it('nothing is built on water, rock, standing trees, roads or the green', () => {
-    for (const seed of [1, 7, 42]) {
+  it('nothing is built on water, peaks, roads or the green; footprints never overlap', () => {
+    for (const seed of [1, 7]) {
       const s = newGame(seed, 0, 0);
       const map = getMap(seed);
-      for (let i = 0; i < MAP_W * MAP_H; i++) {
-        const t = map.terrain[i];
-        const c = canPlace(s, 'hut', i);
-        if (isWater(t) || t === T.Mountain || t === T.Peak || wooded(s, i) || derived(s).occupied[i]) expect(c.ok, `${seed}:${i}`).toBe(false);
+      const d = derived(s);
+      for (const i of d.terrTiles) {
+        for (const type of ['hut', 'farm'] as const) {
+          const c = canPlace(s, type, i);
+          if (!c.ok) continue;
+          for (const j of footprint(type, tx(i), ty(i))!) {
+            expect(isWater(map.terrain[j]), `${seed}:${type}@${i}`).toBe(false);
+            expect(map.terrain[j]).not.toBe(T.Peak);
+            expect(d.occupied[j]).toBe(0);
+          }
+        }
       }
     }
   });
 
-  it('felled forest can be built on', () => {
+  it('standing forest can be built on: the trees are felled first, for their timber', () => {
     const s = newGame(7, 0, 0);
+    s.council.build = false;
+    s.council.jobs = false;
     const d = derived(s);
-    let tile = -1;
-    for (let i = 0; i < MAP_W * MAP_H && tile < 0; i++) {
-      const c = canPlace(s, 'hut', i);
-      if (d.territory[i] && !c.ok && c.reason.startsWith('Trees')) tile = i;
-    }
-    expect(tile).toBeGreaterThanOrEqual(0);
-    s.land.wood[tile] = 0;
-    s.landEpoch++;
-    const c = canPlace(s, 'hut', tile);
-    expect(c.ok ? '' : c.reason).not.toMatch(/^Trees/);
+    const tile = d.terrTiles.find((i) => wooded(s, i) && canPlace(s, 'hut', i).ok);
+    expect(tile).toBeDefined();
+    const wood0 = s.land.wood[tile!];
+    s.res.wood = 50;
+    expect(placeBuilding(s, 'hut', tile!, tx(tile!), ty(tile!)).ok).toBe(true);
+    const b = s.buildings[s.buildings.length - 1];
+    expect(siteStage(s, b)).toBe('felling');
+    expect(s.land.wood[tile!]).toBe(wood0);
+    setJobTarget(s, 'builder', 3);
+    const before = s.res.wood;
+    run(s, 60);
+    expect(s.land.wood[tile!]).toBe(0);
+    expect(b.done).toBe(true);
+    expect(s.res.wood).toBeGreaterThan(before);
   });
 
-  it('every building is joined to the green by a connected road network', () => {
+  it('a mountainside can be built on after a long levelling, which turns up stone', () => {
+    let found: { s: GameState; tile: number } | null = null;
+    for (const seed of [1, 2, 3, 42, 7]) {
+      const s = newGame(seed, 0, 0);
+      for (let i = 0; i < s.explored.length; i++) s.explored[i] = 1;
+      s.techs.push('stone_tools');
+      invalidate(s);
+      const tile = derived(s).terrTiles.find((i) => getMap(seed).terrain[i] === T.Mountain && canPlace(s, 'hut', i).ok);
+      if (tile !== undefined) {
+        found = { s, tile };
+        break;
+      }
+    }
+    expect(found).not.toBeNull();
+    const { s, tile } = found!;
+    s.council.build = false;
+    const need = prepNeeded(s, 'hut', tx(tile), ty(tile));
+    expect(need.level).toBeGreaterThanOrEqual(30);
+    s.res.wood = 50;
+    expect(placeBuilding(s, 'hut', tile, tx(tile), ty(tile)).ok).toBe(true);
+    const b = s.buildings[s.buildings.length - 1];
+    expect(siteStage(s, b)).toBe('levelling');
+    const stone = s.res.stone;
+    for (let k = 0; k < 400 && !b.done; k++) tick(s, ctx());
+    expect(b.done).toBe(true);
+    expect(s.graded).toContain(tile);
+    expect(s.res.stone).toBeGreaterThan(stone);
+  });
+
+  it('works are done in queue order, and a site can be moved to the front', () => {
+    const s = newGame(3, 0, 0);
+    s.council.build = false;
+    s.council.jobs = false;
+    s.res.wood = 200;
+    const d = derived(s);
+    const open = d.terrTiles.filter((i) => canPlace(s, 'hut', i).ok && prepNeeded(s, 'hut', tx(i), ty(i)).fell === 0);
+    expect(placeBuilding(s, 'hut', open[0], tx(open[0]), ty(open[0])).ok).toBe(true);
+    const later = derived(s).terrTiles.find((i) => canPlace(s, 'hut', i).ok && prepNeeded(s, 'hut', tx(i), ty(i)).fell === 0)!;
+    expect(placeBuilding(s, 'hut', later, tx(later), ty(later)).ok).toBe(true);
+    const [first, second] = worksQueue(s);
+    expect(prioritise(s, second.id).ok).toBe(true);
+    expect(worksQueue(s)[0].id).toBe(second.id);
+    setJobTarget(s, 'builder', 1);
+    for (let k = 0; k < 40 && !second.done; k++) tick(s, ctx());
+    expect(second.done).toBe(true);
+    expect(first.progress).toBeLessThan(BUILDING_DEFS.hut.work);
+  });
+
+  it('big buildings cover their whole footprint', () => {
+    const s = newGame(5, 0, 0);
+    const farm = build(s, 'farm');
+    const d = derived(s);
+    for (const i of footprint('farm', farm.x, farm.y)!) expect(d.buildingAt[i]).toBe(farm.id);
+    expect(canPlace(s, 'hut', idx(farm.x + 1, farm.y + 1)).ok).toBe(false);
+  });
+
+  it('every building is joined to a green by a connected road network', () => {
     const s = newGame(11, 0, 0);
     run(s, DAYS_PER_YEAR * 8);
     const d = derived(s);
     expect(s.roads.length).toBeGreaterThan(0);
     for (const b of s.buildings) {
       if (b.type === 'campfire') continue;
-      const touches = N4.some(([dx, dy]) => inBounds(b.x + dx, b.y + dy) && d.network[idx(b.x + dx, b.y + dy)]);
+      const [w, h] = sizeOf(b.type);
+      const touches = ringOf(b.x, b.y, w, h).some(([x, y]) => inBounds(x, y) && d.network[idx(x, y)]);
       expect(touches, `${b.type} at ${b.x},${b.y}`).toBe(true);
     }
-    // Every road leads back to the hearth.
-    const h = s.buildings[0];
-    const seen = new Set([idx(h.x, h.y)]);
-    const queue = [idx(h.x, h.y)];
+    // Every road leads back to a hearth.
+    const seen = new Set<number>();
+    const queue: number[] = [];
+    for (const h of s.buildings.filter((b) => b.type === 'campfire')) (seen.add(idx(h.x, h.y)), queue.push(idx(h.x, h.y)));
     for (let q = 0; q < queue.length; q++)
       for (const [dx, dy] of N4) {
         const x = tx(queue[q]) + dx;
@@ -177,21 +247,12 @@ describe('saving the land', () => {
     expect(serialize(s).length).toBeLessThan(60_000);
   });
 
-  it('upgrades saves from before the land could run out', () => {
+  it('declines saves made on the old, smaller world', () => {
     const s = newGame(22, 0, 0);
-    run(s, DAYS_PER_YEAR * 3);
     const raw = JSON.parse(serialize(s));
-    raw.version = 4;
-    delete raw.land;
-    delete raw.roads;
-    delete raw.landEpoch;
-    delete raw.eff;
-    const back = deserialize(JSON.stringify(raw))!;
-    expect(back).not.toBeNull();
-    expect(back.land.wood.length).toBe(MAP_W * MAP_H);
-    expect(back.roads.length).toBeGreaterThan(0);
-    run(back, 20);
-    expect(back.defeat).toBe(false);
+    raw.version = 5;
+    expect(deserialize(JSON.stringify(raw))).toBeNull();
+    expect(isLegacySave(JSON.stringify(raw))).toBe(true);
   });
 
   it('catchments only reach tiles that hold the resource', () => {

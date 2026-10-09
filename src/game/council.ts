@@ -9,7 +9,7 @@ import { choiceOf, nextPath, pathRequirements, tweak } from './decisions';
 import { canAfford, canPlace, census, derived, SPECIALTY_NAMES, type Derived, type Specialty } from './derived';
 import { blocked, catchmentAt, centerOf, dryLand, hearthOf, layerSum, prepNeeded, ringOf, sizeOf } from './land';
 import { getMap, idx, inBounds, N4, N8, tx, ty } from './map';
-import { townCalling } from './realm';
+import { townCalling, unpaved } from './realm';
 import { baseRate, foodDemand, gathererCapacity, jobOutput, pastureYield, popSummary, yieldEff, type TickContext } from './sim';
 import { eraOf, hasTech, seasonIndex } from './state';
 import type { BuildingId, Cost, GameState, JobId, ResourceId, TechId } from './types';
@@ -537,6 +537,8 @@ function councilJobs(state: GameState) {
   const pop = state.settlers.length;
 
   take('healer', Math.ceil(pop / 14));
+  // Trade routes' trails wait to be paved: a builder or two, even when nothing else is being built.
+  if (!d.sites.length && state.routes.length && state.res.stone >= 5 && unpaved(state) > 0) take('builder', Math.max(1, Math.floor(ps.adults * 0.05)));
 
   // Food: cover today's needs first, then build toward the winter reserve.
   const need = foodDemand(state, ps);
@@ -581,6 +583,7 @@ function councilJobs(state: GameState) {
   const sites = d.sites.length;
   const monument = d.sites.some((b) => b.type === 'monument');
   if (sites) take('builder', Math.max(1, ps.adults * Math.max(tweak(state, 'builders') / 100, monument ? 0.3 : 0)));
+
   take('scholar', 1);
 
   // Stock up for winter when there is room in the stores.
@@ -588,7 +591,8 @@ function councilJobs(state: GameState) {
 
   // Exploration
   const unexplored = MAP_W * MAP_H - state.stats.tilesExplored;
-  if (unexplored > 40 && ps.adults >= (focus === 'explore' ? 5 : 8)) take('scout', tweak(state, 'scouts') + (focus === 'explore' ? 2 : 0));
+  // A wider realm sends out more scouts: one more with each age, and one from each settlement.
+  if (unexplored > 40 && ps.adults >= (focus === 'explore' ? 5 : 8)) take('scout', tweak(state, 'scouts') + (focus === 'explore' ? 2 : 0) + (ps.adults >= 20 ? Math.min(2, eraOf(state)) : 0) + Math.min(3, state.towns.length - 1));
 
   // Split the rest by focus
   const rest = adults;

@@ -1,16 +1,20 @@
-import { BUILDING_DEFS, FEATURE_NAMES, MAP_H, MAP_W } from '../game/data';
+import { BUILDING_DEFS, FEATURE_NAMES, MAP_H, MAP_W, TIERS } from '../game/data';
 import { canPlace, derived } from '../game/derived';
-import { landMax } from '../game/land';
+import { fellLeft, hearthOf, landMax, sizeOf, siteStage, tilesOf } from '../game/land';
 import { getMap, idx, inBounds, isWater, tx, ty } from '../game/map';
+import { townTitle } from '../game/realm';
 import { hash2 } from '../game/rng';
 import { eraOf, seasonIndex } from '../game/state';
 import type { Building, BuildingId, FxEvent, GameState } from '../game/types';
 import { F } from '../game/types';
 import { Actors, jobColor } from './actors';
 import { makeCanvas, sprite } from './sprites';
-import { ForestLayer, TILE, terrainCanvas, TREE_PAL } from './terrain';
+import { CHUNK, climateSeason, ForestLayer, OVERVIEW_PX, overviewCanvas, terrainChunk, TILE, TREE_PAL } from './terrain';
 
-const ZOOMS = [1, 2, 3, 4, 5, 6];
+/** Zoom levels: below 1 the world is shown from the overview map. */
+export const ZOOMS = [0.25, 0.5, 1, 2, 3, 4, 5, 6];
+/** Zoom level index (1-based) for a pixel scale. */
+export const zoomFor = (scale: number) => ZOOMS.indexOf(scale) + 1;
 
 const FARM_PAL = [
   { U: '#7a5230', '1': '#86cf53' },
@@ -41,7 +45,7 @@ export class MapView {
   private borderKey = '';
   private netKey = '';
   private forest = new ForestLayer();
-  /** Per tile: 1 road, 2 village green, 3 bridge, 4 building. */
+  /** Per tile: 1 road, 2 village green, 3 bridge, 4 building, 5 trail. */
   private net = new Uint8Array(MAP_W * MAP_H);
   private border: [number, number, number, number][] = [];
   private lastSeason = -1;
@@ -55,6 +59,9 @@ export class MapView {
   private pinch: { d: number; zoom: number } | null = null;
   private keys = new Set<string>();
 
+  private mini: HTMLCanvasElement | null = null;
+  private miniTimer = 0;
+
   constructor(
     readonly canvas: HTMLCanvasElement,
     private getState: () => GameState,
@@ -64,6 +71,7 @@ export class MapView {
     this.ctx = canvas.getContext('2d', { alpha: false })!;
     this.actors = new Actors(getState);
     this.bindInput();
+    this.bindMinimap();
     const ro = new ResizeObserver(() => this.resize());
     ro.observe(canvas);
     this.resize();
@@ -87,8 +95,14 @@ export class MapView {
     this.clampCam();
   }
 
-  private get scale() {
-    return Math.max(1, Math.round(ZOOMS[this.cam.zoom - 1] * this.dpr));
+  get scale() {
+    const z = ZOOMS[this.cam.zoom - 1] * this.dpr;
+    return z >= 1 ? Math.max(1, Math.round(z)) : z;
+  }
+
+  /** Whether the full detail (chunks, sprites, people) is drawn, or only the overview map. */
+  get detailed() {
+    return ZOOMS[this.cam.zoom - 1] >= 1;
   }
 
   setZoom(z: number, ax?: number, ay?: number) {
@@ -118,8 +132,8 @@ export class MapView {
     const H = MAP_H * TILE;
     const vw = this.canvas.width / this.scale;
     const vh = this.canvas.height / this.scale;
-    const mx = Math.max(0, (vw - W) / 2) + vw * 0.25;
-    const my = Math.max(0, (vh - H) / 2) + vh * 0.25;
+    const mx = Math.max(0, (vw - W) / 2) + Math.min(vw * 0.25, 12 * TILE);
+    const my = Math.max(0, (vh - H) / 2) + Math.min(vh * 0.25, 12 * TILE);
     this.cam.x = Math.max(vw / 2 - mx, Math.min(W - vw / 2 + mx, this.cam.x));
     this.cam.y = Math.max(vh / 2 - my, Math.min(H - vh / 2 + my, this.cam.y));
   }
@@ -220,6 +234,62 @@ export class MapView {
     window.addEventListener('blur', () => this.keys.clear());
   }
 
+  /** The minimap: the known world, the settlements, and where the camera looks. Click or drag to move. */
+  private bindMinimap() {
+    const m = document.getElementById('minimap') as HTMLCanvasElement | null;
+    if (!m) return;
+    this.mini = m;
+    m.width = MAP_W;
+    m.height = MAP_H;
+    let down = false;
+    const go = (e: PointerEvent) => {
+      const r = m.getBoundingClientRect();
+      this.centerOn(((e.clientX - r.left) / r.width) * MAP_W, ((e.clientY - r.top) / r.height) * MAP_H);
+      this.miniTimer = 0;
+    };
+    m.addEventListener('pointerdown', (e) => {
+      down = true;
+      m.setPointerCapture(e.pointerId);
+      go(e);
+    });
+    m.addEventListener('pointermove', (e) => down && go(e));
+    m.addEventListener('pointerup', () => (down = false));
+    m.addEventListener('pointercancel', () => (down = false));
+  }
+
+  private drawMinimap(state: GameState, dt: number) {
+    const m = this.mini;
+    if (!m || m.classList.contains('hidden')) return;
+    this.miniTimer -= dt;
+    if (this.miniTimer > 0) return;
+    this.miniTimer = 0.3;
+    const ctx = m.getContext('2d')!;
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(overviewCanvas(state.seed, seasonIndex(state.day)), 0, 0, MAP_W, MAP_H);
+    this.updateFog(state);
+    ctx.drawImage(this.fog, 0, 0);
+    ctx.fillStyle = '#d9b46c';
+    for (const i of state.roads) ctx.fillRect(tx(i), ty(i), 1, 1);
+    for (const t of state.towns) {
+      const r = 1 + t.tier;
+      ctx.fillStyle = '#1a1423';
+      ctx.fillRect(t.x - r - 1, t.y - r - 1, 2 * r + 3, 2 * r + 3);
+      ctx.fillStyle = t === state.towns[0] ? '#ffd25e' : '#f6f2ea';
+      ctx.fillRect(t.x - r, t.y - r, 2 * r + 1, 2 * r + 1);
+    }
+    for (const e of state.expeditions) {
+      const i = e.path[e.at];
+      ctx.fillStyle = '#ff7a4a';
+      ctx.fillRect(tx(i) - 1, ty(i) - 1, 3, 3);
+    }
+    const s = this.scale;
+    const vw = this.canvas.width / s / TILE;
+    const vh = this.canvas.height / s / TILE;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(Math.round(this.cam.x / TILE - vw / 2) + 0.5, Math.round(this.cam.y / TILE - vh / 2) + 0.5, Math.round(vw), Math.round(vh));
+  }
+
   handleFx(fx: FxEvent[]) {
     const state = this.getState();
     const a = this.actors;
@@ -239,8 +309,9 @@ export class MapView {
         case 'built': {
           const b = state.buildings.find((x) => x.id === f.building);
           if (!b) break;
-          for (let k = 0; k < 14; k++) a.emit({ kind: 'dust', x: b.x + 0.5 + (Math.random() - 0.5) * 0.9, y: b.y + 0.9, vx: (Math.random() - 0.5) * 1.2, vy: -Math.random() * 0.6, life: 0.6 + Math.random() * 0.5, size: 1 + Math.random() * 1.5 });
-          for (let k = 0; k < 6; k++) a.emit({ kind: 'star', x: b.x + 0.5, y: b.y + 0.3, vx: (Math.random() - 0.5) * 2, vy: -1 - Math.random(), life: 0.9, size: 1 });
+          const [w, hh] = sizeOf(b.type);
+          for (let k = 0; k < 14 * w; k++) a.emit({ kind: 'dust', x: b.x + w / 2 + (Math.random() - 0.5) * 0.9 * w, y: b.y + hh - 0.1, vx: (Math.random() - 0.5) * 1.2, vy: -Math.random() * 0.6, life: 0.6 + Math.random() * 0.5, size: 1 + Math.random() * 1.5 });
+          for (let k = 0; k < 6; k++) a.emit({ kind: 'star', x: b.x + w / 2, y: b.y + 0.3, vx: (Math.random() - 0.5) * 2, vy: -1 - Math.random(), life: 0.9, size: 1 });
           break;
         }
         case 'discover': {
@@ -254,8 +325,20 @@ export class MapView {
           if (name) a.emit({ kind: 'text', x, y: y - 0.6, vx: 0, vy: -0.25, life: 3, size: 1, text: name, color: '#ffe08a' });
           break;
         }
+        case 'found':
+        case 'tier': {
+          const t = state.towns.find((x) => x.id === f.town);
+          if (!t) break;
+          a.emit({ kind: 'beam', x: t.x + 0.5, y: t.y + 0.6, vx: 0, vy: 0, life: 3, size: 1 });
+          a.emit({ kind: 'text', x: t.x + 0.5, y: t.y - 1, vx: 0, vy: -0.2, life: 4, size: 1, text: f.kind === 'found' ? `${t.name} founded` : `${t.name}: ${TIERS[f.tier].name}`, color: '#ffe08a' });
+          for (let k = 0; k < 20; k++) {
+            const ang = Math.random() * Math.PI * 2;
+            a.emit({ kind: 'star', x: t.x + 0.5, y: t.y + 0.3, vx: Math.cos(ang) * 2.5, vy: Math.sin(ang) * 2.5 - 1, life: 1.2, size: 1 });
+          }
+          break;
+        }
         case 'era': {
-          const h = state.buildings.find((b) => b.type === 'campfire')!;
+          const h = hearthOf(state);
           a.emit({ kind: 'beam', x: h.x + 0.5, y: h.y + 0.6, vx: 0, vy: 0, life: 3, size: 1 });
           for (let k = 0; k < 30; k++) {
             const ang = Math.random() * Math.PI * 2;
@@ -281,6 +364,7 @@ export class MapView {
     this.syncTimer -= dt;
     if (this.syncTimer <= 0) {
       this.syncTimer = 0.25;
+      this.actors.focus = [this.cam.x / TILE, this.cam.y / TILE];
       this.actors.syncSettlers(state, ++this.syncStamp);
       this.actors.syncAnimals(state);
     }
@@ -288,18 +372,23 @@ export class MapView {
     this.actors.update(speed === 0 ? 0 : dt, Math.max(1, speed));
     this.emitAmbient(state, dt, speed);
     this.render(state);
+    this.drawMinimap(state, dt);
   }
 
   private emitAmbient(state: GameState, dt: number, speed: number) {
     const a = this.actors;
     if (speed === 0) return;
     const season = seasonIndex(state.day);
+    const vx0 = this.cam.x / TILE - this.canvas.width / this.scale / TILE / 2 - 2;
+    const vx1 = this.cam.x / TILE + this.canvas.width / this.scale / TILE / 2 + 2;
+    const vy0 = this.cam.y / TILE - this.canvas.height / this.scale / TILE / 2 - 2;
+    const vy1 = this.cam.y / TILE + this.canvas.height / this.scale / TILE / 2 + 3;
     for (const b of state.buildings) {
-      if (!b.done) continue;
+      if (!b.done || b.x < vx0 || b.x > vx1 || b.y < vy0 || b.y > vy1) continue;
       if (b.type === 'campfire' && Math.random() < dt * 4) a.emit({ kind: 'smoke', x: b.x + 0.5 + (Math.random() - 0.5) * 0.15, y: b.y + 0.35, vx: 0.05, vy: -0.45, life: 2.2, size: 1.2 });
       if (b.type === 'campfire' && Math.random() < dt * 6) a.emit({ kind: 'spark', x: b.x + 0.5 + (Math.random() - 0.5) * 0.2, y: b.y + 0.5, vx: (Math.random() - 0.5) * 0.4, vy: -0.8 - Math.random(), life: 0.6, size: 1 });
       if (b.type === 'smithy' && Math.random() < dt * 2.5) a.emit({ kind: 'smoke', x: b.x + 0.75, y: b.y - 0.05, vx: 0.08, vy: -0.4, life: 2.5, size: 1.2 });
-      if ((b.type === 'house' || (b.type === 'hut' && eraOf(state) >= 2)) && season === 3 && Math.random() < dt * 0.8) a.emit({ kind: 'smoke', x: b.x + 0.72, y: b.y + 0.05, vx: 0.06, vy: -0.35, life: 2, size: 1 });
+      if ((b.type === 'house' || b.type === 'manor' || (b.type === 'hut' && eraOf(state) >= 2)) && season === 3 && Math.random() < dt * 0.8) a.emit({ kind: 'smoke', x: b.x + 0.72, y: b.y + 0.05, vx: 0.06, vy: -0.35, life: 2, size: 1 });
     }
     // Weather in the visible area.
     const vw = this.canvas.width / this.scale / TILE;
@@ -312,7 +401,7 @@ export class MapView {
     this.birdTimer -= dt;
     if (this.birdTimer <= 0) {
       this.birdTimer = 12 + Math.random() * 20;
-      if (season !== 3) a.spawnBirds(MAP_W, MAP_H);
+      if (season !== 3) a.spawnBirds(x0 - 2, x0 + vw + 2, y0 + Math.random() * vh);
     }
   }
 
@@ -340,8 +429,7 @@ export class MapView {
     if (key === this.placeKey) return;
     this.placeKey = key;
     this.placeValid.clear();
-    for (let i = 0; i < MAP_W * MAP_H; i++) {
-      if (!d.territory[i]) continue;
+    for (const i of d.terrTiles) {
       const c = canPlace(state, this.placing, i, d);
       if (c.ok) this.placeValid.set(i, c.mult);
     }
@@ -349,7 +437,7 @@ export class MapView {
 
   private updateBorder(state: GameState) {
     const d = derived(state);
-    const key = `${state.buildings.length}:${state.buildings.filter((b) => b.done).length}`;
+    const key = `${state.buildings.length}:${state.buildings.filter((b) => b.done).length}:${state.towns.map((t) => t.tier).join()}:${eraOf(state)}`;
     if (key === this.borderKey) return;
     this.borderKey = key;
     const t = d.territory;
@@ -375,7 +463,7 @@ export class MapView {
     const ox = Math.round(W / 2 - this.cam.x * s);
     const oy = Math.round(H / 2 - this.cam.y * s);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = '#0e0b16';
+    ctx.fillStyle = '#1f4677';
     ctx.fillRect(0, 0, W, H);
     ctx.setTransform(s, 0, 0, s, ox, oy);
     ctx.imageSmoothingEnabled = false;
@@ -387,7 +475,7 @@ export class MapView {
     const vy1 = Math.ceil((H - oy) / s / TILE) + 3;
     const visible = (x: number, y: number) => x >= vx0 && x <= vx1 && y >= vy0 && y <= vy1;
 
-    // Terrain with season crossfade
+    // Seasons cross-fade.
     const season = seasonIndex(state.day);
     if (season !== this.lastSeason) {
       this.prevSeason = this.lastSeason < 0 ? season : this.lastSeason;
@@ -395,57 +483,88 @@ export class MapView {
       this.lastSeason = season;
     }
     this.seasonFade = Math.min(1, this.seasonFade + 0.02);
-    if (this.seasonFade < 1) {
-      ctx.drawImage(terrainCanvas(state.seed, this.prevSeason), 0, 0);
-      ctx.globalAlpha = this.seasonFade;
-    }
-    ctx.drawImage(terrainCanvas(state.seed, season), 0, 0);
-    ctx.globalAlpha = 1;
-
     const map = getMap(state.seed);
-    // Water sparkles
-    ctx.fillStyle = 'rgba(255,255,255,0.75)';
-    for (let y = Math.max(0, vy0); y < Math.min(MAP_H, vy1); y++)
-      for (let x = Math.max(0, vx0); x < Math.min(MAP_W, vx1); x++) {
-        const i = idx(x, y);
-        if (!isWater(map.terrain[i])) continue;
-        const h = hash2(x, y, 11);
-        const t = (this.time * 0.6 + h * 10) % 4;
-        if (t < 0.5) {
-          const px = x * TILE + Math.floor(h * 12) + 2;
-          const py = y * TILE + Math.floor(hash2(x, y, 12) * 12) + 2;
-          ctx.fillRect(px, py, t < 0.25 ? 2 : 1, 1);
-        }
-      }
+    const d = derived(state);
 
-    // Roads, the village green, bridges and worked hillsides lie on the ground under everything else.
-    this.drawGround(state, vx0, vy0, vx1, vy1);
-    // Then the woods as they stand today.
-    const occupied = derived(state).occupied;
-    if (this.seasonFade < 1) {
-      ctx.drawImage(this.forest.canvas(state, this.prevSeason, occupied), 0, 0);
-      ctx.globalAlpha = this.seasonFade;
+    if (!this.detailed) {
+      // Far out: the overview map, the network and the settlements.
+      this.drawOverview(state, season);
+    } else {
+      // Ground, chunk by chunk as it comes into view (a few new chunks a frame; the overview fills in meanwhile).
+      const budget = { n: 3 };
+      const cx0 = Math.max(0, Math.floor(vx0 / CHUNK));
+      const cy0 = Math.max(0, Math.floor(vy0 / CHUNK));
+      const cx1 = Math.min(Math.ceil(MAP_W / CHUNK) - 1, Math.floor(vx1 / CHUNK));
+      const cy1 = Math.min(Math.ceil(MAP_H / CHUNK) - 1, Math.floor(vy1 / CHUNK));
+      const over = overviewCanvas(state.seed, season);
+      const drawGroundChunks = (sea: number) => {
+        for (let cy = cy0; cy <= cy1; cy++)
+          for (let cx = cx0; cx <= cx1; cx++) {
+            const c = terrainChunk(state, sea, cx, cy, budget);
+            const X = cx * CHUNK * TILE;
+            const Y = cy * CHUNK * TILE;
+            if (c) ctx.drawImage(c, X, Y);
+            else ctx.drawImage(over, cx * CHUNK * OVERVIEW_PX, cy * CHUNK * OVERVIEW_PX, CHUNK * OVERVIEW_PX, CHUNK * OVERVIEW_PX, X, Y, CHUNK * TILE, CHUNK * TILE);
+          }
+      };
+      if (this.seasonFade < 1) {
+        drawGroundChunks(this.prevSeason);
+        ctx.globalAlpha = this.seasonFade;
+      }
+      drawGroundChunks(season);
+      ctx.globalAlpha = 1;
+
+      // Water sparkles
+      ctx.fillStyle = 'rgba(255,255,255,0.75)';
+      for (let y = Math.max(0, vy0); y < Math.min(MAP_H, vy1); y++)
+        for (let x = Math.max(0, vx0); x < Math.min(MAP_W, vx1); x++) {
+          const i = idx(x, y);
+          if (!isWater(map.terrain[i])) continue;
+          const h = hash2(x, y, 11);
+          const t = (this.time * 0.6 + h * 10) % 4;
+          if (t < 0.5) {
+            const px = x * TILE + Math.floor(h * 12) + 2;
+            const py = y * TILE + Math.floor(hash2(x, y, 12) * 12) + 2;
+            ctx.fillRect(px, py, t < 0.25 ? 2 : 1, 1);
+          }
+        }
+
+      // Roads, trails, the village greens, bridges and worked hillsides lie on the ground under everything else.
+      this.drawGround(state, vx0, vy0, vx1, vy1);
+      // Then the woods as they stand today.
+      const drawForests = (sea: number) => {
+        for (let cy = cy0; cy <= cy1; cy++)
+          for (let cx = cx0; cx <= cx1; cx++) {
+            const c = this.forest.canvas(state, sea, cx, cy, d.occupied, d.siteMask);
+            if (c) ctx.drawImage(c, cx * CHUNK * TILE, cy * CHUNK * TILE);
+          }
+      };
+      if (this.seasonFade < 1) {
+        drawForests(this.prevSeason);
+        ctx.globalAlpha = this.seasonFade;
+      }
+      drawForests(season);
+      ctx.globalAlpha = 1;
     }
-    ctx.drawImage(this.forest.canvas(state, season, occupied), 0, 0);
-    ctx.globalAlpha = 1;
 
     // Territory border
     this.updateBorder(state);
     ctx.save();
     ctx.strokeStyle = this.placing ? 'rgba(255,214,120,0.9)' : 'rgba(255,214,120,0.35)';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([3, 2]);
+    ctx.lineWidth = this.detailed ? 1 : 1 / s;
+    ctx.setLineDash(this.detailed ? [3, 2] : []);
     ctx.lineDashOffset = -this.time * 4;
     ctx.beginPath();
     for (const [x1, y1, x2, y2] of this.border) {
+      if (x2 / TILE < vx0 || x1 / TILE > vx1 || y2 / TILE < vy0 || y1 / TILE > vy1) continue;
       ctx.moveTo(x1 + 0.5, y1 + 0.5);
       ctx.lineTo(x2 + 0.5, y2 + 0.5);
     }
     ctx.stroke();
     ctx.restore();
 
-    // Placement overlay
-    if (this.placing) {
+    // Placement overlay: every tile where the building's top-left corner could go.
+    if (this.placing && this.detailed) {
       this.updatePlacement(state);
       const pulse = 0.18 + Math.sin(this.time * 4) * 0.06;
       for (const [i, mult] of this.placeValid) {
@@ -457,39 +576,46 @@ export class MapView {
       }
     }
 
-    // Dynamic layer sorted by y
-    type Item = { y: number; draw: () => void };
-    const items: Item[] = [];
-    const claimed = new Set(state.claimed);
-    for (let y = Math.max(0, vy0); y < Math.min(MAP_H, vy1); y++)
-      for (let x = Math.max(0, vx0); x < Math.min(MAP_W, vx1); x++) {
-        const i = idx(x, y);
-        const f = map.feature[i];
-        if (!f || f === F.Berries || f === F.Game || f === F.Fish) continue;
-        if (!state.explored[i]) continue;
-        if ((f === F.Tribe || f === F.Cache) && claimed.has(i)) continue;
-        if (f === F.Ore && state.land.ore[i] <= 0) continue;
-        items.push({ y: y + 0.9, draw: () => this.drawFeature(f, x, y) });
+    if (this.detailed) {
+      // Dynamic layer sorted by y
+      type Item = { y: number; draw: () => void };
+      const items: Item[] = [];
+      const claimed = new Set(state.claimed);
+      for (let y = Math.max(0, vy0); y < Math.min(MAP_H, vy1); y++)
+        for (let x = Math.max(0, vx0); x < Math.min(MAP_W, vx1); x++) {
+          const i = idx(x, y);
+          const f = map.feature[i];
+          if (!f || f === F.Berries || f === F.Game || f === F.Fish) continue;
+          if (!state.explored[i]) continue;
+          if ((f === F.Tribe || f === F.Cache) && claimed.has(i)) continue;
+          if (f === F.Ore && (state.land.ore[i] <= 0 || d.buildingAt[i])) continue;
+          items.push({ y: y + 0.9, draw: () => this.drawFeature(f, x, y) });
+        }
+      for (const b of state.buildings) {
+        const [w, h] = sizeOf(b.type);
+        if (!visible(b.x, b.y) && !visible(b.x + w - 1, b.y + h - 1)) continue;
+        if (b.type === 'bridge') continue;
+        items.push({ y: b.y + h - 0.05, draw: () => this.drawBuilding(state, b) });
       }
-    for (const b of state.buildings) {
-      if (!visible(b.x, b.y) || b.type === 'bridge') continue;
-      items.push({ y: b.y + 0.95, draw: () => this.drawBuilding(state, b) });
-    }
-    for (const w of this.actors.walkers.values()) {
-      if (!visible(Math.floor(w.x), Math.floor(w.y))) continue;
-      items.push({ y: w.y, draw: () => this.drawWalker(w, state) });
-    }
-    for (const a of this.actors.animals) {
-      if (a.kind === 'bird') continue;
-      if (!visible(Math.floor(a.x), Math.floor(a.y))) continue;
-      if (!state.explored[idx(Math.min(MAP_W - 1, Math.max(0, Math.floor(a.x))), Math.min(MAP_H - 1, Math.max(0, Math.floor(a.y))))]) continue;
-      items.push({ y: a.y, draw: () => this.drawAnimal(a.kind, a.x, a.y, a.phase, a.facing) });
-    }
-    items.sort((a, b) => a.y - b.y);
-    for (const it of items) it.draw();
+      for (const w of this.actors.walkers.values()) {
+        if (!visible(Math.floor(w.x), Math.floor(w.y))) continue;
+        items.push({ y: w.y, draw: () => this.drawWalker(w, state) });
+      }
+      for (const a of this.actors.animals) {
+        if (a.kind === 'bird') continue;
+        if (!visible(Math.floor(a.x), Math.floor(a.y))) continue;
+        if (!state.explored[idx(Math.min(MAP_W - 1, Math.max(0, Math.floor(a.x))), Math.min(MAP_H - 1, Math.max(0, Math.floor(a.y))))]) continue;
+        items.push({ y: a.y, draw: () => this.drawAnimal(a.kind, a.x, a.y, a.phase, a.facing) });
+      }
+      for (const it of this.travellers(state)) if (visible(Math.floor(it.x), Math.floor(it.y))) items.push({ y: it.y, draw: it.draw });
+      items.sort((a, b) => a.y - b.y);
+      for (const it of items) it.draw();
 
-    // Particles
-    this.drawParticles();
+      // Particles
+      this.drawParticles();
+    } else {
+      for (const it of this.travellers(state)) it.draw();
+    }
 
     // Fog
     this.updateFog(state);
@@ -498,7 +624,7 @@ export class MapView {
     ctx.imageSmoothingEnabled = false;
 
     // Birds fly above the fog
-    for (const a of this.actors.animals) if (a.kind === 'bird') this.drawAnimal('bird', a.x, a.y, a.phase, a.facing);
+    if (this.detailed) for (const a of this.actors.animals) if (a.kind === 'bird') this.drawAnimal('bird', a.x, a.y, a.phase, a.facing);
 
     // Exploration flag
     if (state.exploreTarget !== null) {
@@ -515,53 +641,225 @@ export class MapView {
       ctx.strokeRect(x - 5.5, y + 9.5, 12, 6);
     }
 
+    // Candidate sites while choosing where pioneers go.
+    if (this.siteChoices.length) {
+      for (const [k, c] of this.siteChoices.entries()) {
+        const x = tx(c.tile) * TILE;
+        const y = ty(c.tile) * TILE;
+        const pulse = 0.5 + 0.5 * Math.sin(this.time * 4 + k);
+        ctx.strokeStyle = k === 0 ? `rgba(255,224,138,${0.6 + pulse * 0.4})` : `rgba(157,255,157,${0.4 + pulse * 0.4})`;
+        ctx.lineWidth = Math.max(1, 1.5 / s);
+        ctx.strokeRect(x - TILE * 2 + 0.5, y - TILE * 2 + 0.5, TILE * 5 - 1, TILE * 5 - 1);
+        if (k === this.siteHover) {
+          ctx.strokeStyle = 'rgba(255,224,138,0.8)';
+          ctx.setLineDash([2, 2]);
+          ctx.beginPath();
+          c.path.forEach((p, n) => (n ? ctx.lineTo(tx(p) * TILE + 8, ty(p) * TILE + 8) : ctx.moveTo(tx(p) * TILE + 8, ty(p) * TILE + 8)));
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+    }
+
     // Hover / selection / ghost
-    const outline = (t: number, color: string) => {
+    const outline = (x: number, y: number, w: number, h: number, color: string) => {
       ctx.strokeStyle = color;
-      ctx.lineWidth = 1;
-      ctx.strokeRect(tx(t) * TILE + 0.5, ty(t) * TILE + 0.5, TILE - 1, TILE - 1);
+      ctx.lineWidth = Math.max(1, 1 / s);
+      ctx.strokeRect(x * TILE + 0.5, y * TILE + 0.5, w * TILE - 1, h * TILE - 1);
     };
-    if (this.selectedTile !== null) outline(this.selectedTile, '#ffd25e');
-    if (this.hoverTile !== null) {
+    const footprintOf = (t: number) => {
+      const b = state.buildings.find((bb) => bb.id === d.buildingAt[t]);
+      if (b) {
+        const [w, h] = sizeOf(b.type);
+        return [b.x, b.y, w, h] as const;
+      }
+      return [tx(t), ty(t), 1, 1] as const;
+    };
+    if (this.selectedTile !== null) outline(...footprintOf(this.selectedTile), '#ffd25e');
+    if (this.hoverTile !== null && this.detailed) {
       if (this.placing) {
         const ok = this.placeValid.has(this.hoverTile);
         const x = tx(this.hoverTile);
         const y = ty(this.hoverTile);
+        const [w, h] = sizeOf(this.placing);
         ctx.globalAlpha = 0.75;
         this.drawBuildingSprite(state, this.placing, x, y, 1);
         ctx.globalAlpha = 1;
-        outline(this.hoverTile, ok ? '#9dff9d' : '#ff6b6b');
+        outline(x, y, w, h, ok ? '#9dff9d' : '#ff6b6b');
         const mult = this.placeValid.get(this.hoverTile);
         if (mult !== undefined && mult > 1.001) {
-          this.pixelText(`+${Math.round((mult - 1) * 100)}%`, x * TILE + 8, y * TILE - 6, '#ffe08a');
+          this.pixelText(`+${Math.round((mult - 1) * 100)}%`, x * TILE + (w * TILE) / 2, y * TILE - 6, '#ffe08a');
         } else if (!ok) {
           const r = canPlace(state, this.placing, this.hoverTile);
-          if (!r.ok) this.pixelText(r.reason, x * TILE + 8, y * TILE - 6, '#ff9b9b');
+          if (!r.ok) this.pixelText(r.reason, x * TILE + (w * TILE) / 2, y * TILE - 6, '#ff9b9b');
         }
       } else {
-        outline(this.hoverTile, 'rgba(255,255,255,0.55)');
+        outline(...footprintOf(this.hoverTile), 'rgba(255,255,255,0.55)');
       }
+    }
+
+    // Settlement names, in screen space so they read at every zoom.
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    this.drawLabels(state, s, ox, oy);
+  }
+
+  /** Candidate sites for pioneers, shown while the player picks one (set by the UI). */
+  siteChoices: { tile: number; path: number[] }[] = [];
+  siteHover = -1;
+
+  /** The far view: the overview map, roads and trails as lines, and every settlement as a marker. */
+  private drawOverview(state: GameState, season: number) {
+    const ctx = this.ctx;
+    const over = overviewCanvas(state.seed, season);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(over, 0, 0, MAP_W * TILE, MAP_H * TILE);
+    ctx.fillStyle = 'rgba(184,147,95,0.95)';
+    for (const i of state.roads) ctx.fillRect(tx(i) * TILE + 4, ty(i) * TILE + 4, 8, 8);
+    ctx.fillStyle = 'rgba(150,110,64,0.85)';
+    for (const i of state.trails) ctx.fillRect(tx(i) * TILE + 5, ty(i) * TILE + 5, 6, 6);
+    for (const b of state.buildings) {
+      if (b.type === 'campfire') continue;
+      const [w, h] = sizeOf(b.type);
+      ctx.fillStyle = b.done ? (b.type === 'farm' ? '#d9b84a' : b.type === 'pasture' ? '#9bd06a' : '#8a5a3a') : 'rgba(255,214,120,0.8)';
+      ctx.fillRect(b.x * TILE + 2, b.y * TILE + 2, w * TILE - 4, h * TILE - 4);
+    }
+    for (const t of state.towns) {
+      const r = (2 + t.tier) * TILE * 0.5;
+      ctx.fillStyle = '#1a1423';
+      ctx.fillRect(t.x * TILE + 8 - r / 2 - 4, t.y * TILE + 8 - r / 2 - 4, r + 8, r + 8);
+      ctx.fillStyle = t === state.towns[0] ? '#ffd25e' : '#f2efe6';
+      ctx.fillRect(t.x * TILE + 8 - r / 2, t.y * TILE + 8 - r / 2, r, r);
     }
   }
 
-  /** Which tiles carry roads, the green, bridges and buildings (what a road may join up with). */
+  /** Pioneers on the road, galleys at sea and the caravans and ships of the trade routes. */
+  private travellers(state: GameState): { x: number; y: number; draw: () => void }[] {
+    const out: { x: number; y: number; draw: () => void }[] = [];
+    const map = getMap(state.seed);
+    const at = (path: number[], pos: number): [number, number, number] => {
+      const k = Math.max(0, Math.min(path.length - 1, Math.floor(pos)));
+      const n = Math.min(path.length - 1, k + 1);
+      const f = Math.max(0, Math.min(1, pos - k));
+      const x = tx(path[k]) + (tx(path[n]) - tx(path[k])) * f + 0.5;
+      const y = ty(path[k]) + (ty(path[n]) - ty(path[k])) * f + 0.6;
+      return [x, y, tx(path[n]) - tx(path[k])];
+    };
+    for (const e of state.expeditions) {
+      if (!e.path.length) continue;
+      const [x, y, dir] = at(e.path, e.at + Math.min(0.95, e.step));
+      const sea = map.ocean[e.path[Math.min(e.path.length - 1, e.at + 1)]] === 1 || map.ocean[e.path[e.at]] === 1;
+      out.push({ x, y, draw: () => (sea ? this.drawShip(x, y, dir) : this.drawParty(x, y, e.people.length, dir)) });
+    }
+    for (const r of state.routes) {
+      if (r.path.length < 2) continue;
+      const L = r.path.length - 1;
+      const speed = r.kind === 'sea' ? 2.2 : 0.9;
+      const raw = (this.time * speed + r.id * 7.3) % (2 * L);
+      const pos = raw > L ? 2 * L - raw : raw;
+      const [x, y, dir0] = at(r.path, pos);
+      const dir = raw > L ? -dir0 : dir0;
+      out.push({ x, y, draw: () => (r.kind === 'sea' ? this.drawShip(x, y, dir) : this.drawCart(x, y, dir)) });
+    }
+    return out;
+  }
+
+  private flipDraw(spr: HTMLCanvasElement, px: number, py: number, facing: number) {
+    const ctx = this.ctx;
+    if (facing < 0) {
+      ctx.save();
+      ctx.translate(px, 0);
+      ctx.scale(-1, 1);
+      ctx.drawImage(spr, -Math.floor(spr.width / 2), py - spr.height);
+      ctx.restore();
+    } else ctx.drawImage(spr, px - Math.floor(spr.width / 2), py - spr.height);
+  }
+
+  private drawShip(x: number, y: number, dir: number) {
+    const ctx = this.ctx;
+    const px = Math.round(x * TILE);
+    const py = Math.round(y * TILE) + 4;
+    const spr = sprite(Math.floor(this.time * 3) % 2 ? 'galley0' : 'galley1');
+    ctx.fillStyle = 'rgba(255,255,255,0.45)';
+    ctx.fillRect(px - 12 - (dir < 0 ? -20 : 0), py - 2, 6, 1);
+    this.flipDraw(spr, px, py, dir < 0 ? -1 : 1);
+  }
+
+  private drawCart(x: number, y: number, dir: number) {
+    const ctx = this.ctx;
+    const px = Math.round(x * TILE);
+    const py = Math.round(y * TILE);
+    ctx.fillStyle = 'rgba(10,8,20,0.22)';
+    ctx.fillRect(px - 7, py - 1, 14, 2);
+    this.flipDraw(sprite('cart'), px, py, dir < 0 ? -1 : 1);
+  }
+
+  /** A pioneer party: a few walkers behind a standard. */
+  private drawParty(x: number, y: number, n: number, dir: number) {
+    const ctx = this.ctx;
+    const px = Math.round(x * TILE);
+    const py = Math.round(y * TILE);
+    const step = Math.floor(this.time * 6) % 2;
+    const shirts = ['#3fb6a8', '#a8743c', '#c0533a', '#7bc950', '#8b6cd9'];
+    for (let k = Math.min(n, 4) - 1; k >= 0; k--) {
+      const sx = px - dir * k * 4 + (k % 2 ? 1 : 0);
+      const sy = py + (k % 2) * 2;
+      ctx.fillStyle = 'rgba(10,8,20,0.25)';
+      ctx.fillRect(sx - 3, sy - 1, 6, 2);
+      this.flipDraw(sprite(step ? 'person1' : 'person2', { S: shirts[k % shirts.length], A: '#5d3b2a', U: '#4b3b5a' }), sx, sy, dir < 0 ? -1 : 1);
+    }
+    ctx.drawImage(sprite('flag'), px + (dir < 0 ? -9 : 3), py - 16);
+  }
+
+  private drawLabels(state: GameState, s: number, ox: number, oy: number) {
+    const ctx = this.ctx;
+    const dpr = this.dpr;
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (const t of state.towns) {
+      const X = Math.round((t.x * TILE + 8) * s + ox);
+      const Y = Math.round((t.y * TILE - (this.detailed ? 26 : 4)) * s + oy - (this.detailed ? 0 : 14 * dpr));
+      if (X < -100 || Y < -40 || X > this.canvas.width + 100 || Y > this.canvas.height + 40) continue;
+      const name = t.name;
+      const sub = townTitle(state, t);
+      ctx.font = `${Math.round(11 * dpr)}px "Pixelify Sans", monospace`;
+      const w1 = ctx.measureText(name).width;
+      ctx.font = `${Math.round(8 * dpr)}px Silkscreen, monospace`;
+      const w2 = ctx.measureText(sub).width;
+      const w = Math.max(w1, w2) + 10 * dpr;
+      ctx.fillStyle = 'rgba(14,11,22,0.78)';
+      ctx.fillRect(X - w / 2, Y - 11 * dpr, w, 22 * dpr);
+      ctx.fillStyle = t === state.towns[0] ? '#ffd25e' : '#f6f2ea';
+      ctx.font = `${Math.round(11 * dpr)}px "Pixelify Sans", monospace`;
+      ctx.fillText(name, X, Y - 4 * dpr);
+      ctx.fillStyle = '#c9b98f';
+      ctx.font = `${Math.round(8 * dpr)}px Silkscreen, monospace`;
+      ctx.fillText(sub, X, Y + 6 * dpr);
+    }
+    ctx.restore();
+  }
+
+  /** Which tiles carry roads, trails, the greens, bridges and buildings (what a road may join up with). */
   private updateNet(state: GameState) {
-    const key = `${state.roads.length}:${state.buildings.length}:${state.nextBuildingId}`;
+    const key = `${state.roads.length}:${state.trails.length}:${state.buildings.length}:${state.nextBuildingId}`;
     if (key === this.netKey) return;
     this.netKey = key;
     const net = this.net;
     net.fill(0);
     const map = getMap(state.seed);
+    for (const i of state.trails) net[i] = 5;
     for (const i of state.roads) net[i] = 1;
-    const h = state.buildings.find((b) => b.type === 'campfire')!;
-    for (let dy = -1; dy <= 1; dy++)
-      for (let dx = -1; dx <= 1; dx++) {
-        if (!inBounds(h.x + dx, h.y + dy)) continue;
-        const i = idx(h.x + dx, h.y + dy);
-        const t = map.terrain[i];
-        if (!isWater(t) && t !== 8 && t !== 9) net[i] = 2;
-      }
-    for (const b of state.buildings) net[idx(b.x, b.y)] = b.type === 'bridge' ? 3 : b.type === 'campfire' ? 2 : 4;
+    for (const h of state.buildings) {
+      if (h.type !== 'campfire') continue;
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!inBounds(h.x + dx, h.y + dy)) continue;
+          const i = idx(h.x + dx, h.y + dy);
+          const t = map.terrain[i];
+          if (!isWater(t) && t !== 8 && t !== 9) net[i] = 2;
+        }
+    }
+    for (const b of state.buildings) for (const i of tilesOf(b)) net[i] = b.type === 'bridge' ? 3 : b.type === 'campfire' ? 2 : 4;
   }
 
   private drawGround(state: GameState, vx0: number, vy0: number, vx1: number, vy1: number) {
@@ -579,7 +877,7 @@ export class MapView {
     const y1 = Math.min(MAP_H, vy1);
     const linked = (x: number, y: number) => inBounds(x, y) && net[idx(x, y)] > 0;
 
-    // The village green: packed earth around the hearth.
+    // The village greens: packed earth around each hearth.
     for (let y = y0; y < y1; y++)
       for (let x = x0; x < x1; x++) {
         if (net[idx(x, y)] !== 2) continue;
@@ -595,7 +893,38 @@ export class MapView {
         if (!green(x + 1, y)) ctx.fillRect(X + TILE - 1, Y, 1, TILE);
       }
 
-    // Roads: a track 6px wide, joined to every neighbouring road, bridge, building or the green.
+    // Trails: a rough, narrow track of trodden earth, wandering a little from tile to tile.
+    const trailCol = season === 3 ? 'rgba(170,150,120,0.9)' : 'rgba(140,104,62,0.85)';
+    const trailLight = season === 3 ? 'rgba(220,210,190,0.8)' : 'rgba(196,160,104,0.8)';
+    for (let y = y0 - 1; y <= y1; y++)
+      for (let x = x0 - 1; x <= x1; x++) {
+        if (!inBounds(x, y) || net[idx(x, y)] !== 5) continue;
+        const jx = Math.floor(hash2(x, y, 41) * 3) - 1;
+        const jy = Math.floor(hash2(x, y, 42) * 3) - 1;
+        const cx = x * TILE + 7 + jx;
+        const cy = y * TILE + 8 + jy;
+        const seg = (nx: number, ny: number) => {
+          if (!linked(nx, ny)) return;
+          const tx2 = nx * TILE + 7 + (net[idx(nx, ny)] === 5 ? Math.floor(hash2(nx, ny, 41) * 3) - 1 : 0);
+          const ty2 = ny * TILE + 8 + (net[idx(nx, ny)] === 5 ? Math.floor(hash2(nx, ny, 42) * 3) - 1 : 0);
+          const steps = 8;
+          for (let k = 0; k <= steps; k++) {
+            if ((k + x + y) % 3 === 2) continue; // broken, not a made road
+            const px = Math.round(cx + ((tx2 - cx) * k) / steps / 2);
+            const py = Math.round(cy + ((ty2 - cy) * k) / steps / 2);
+            ctx.fillStyle = trailCol;
+            ctx.fillRect(px, py, 2, 2);
+            ctx.fillStyle = trailLight;
+            ctx.fillRect(px, py, 1, 1);
+          }
+        };
+        seg(x + 1, y);
+        seg(x - 1, y);
+        seg(x, y + 1);
+        seg(x, y - 1);
+      }
+
+    // Roads: a track 6px wide, joined to every neighbouring road, bridge, building, trail or green.
     const roads: number[] = [];
     for (const i of state.roads) {
       const x = tx(i);
@@ -736,63 +1065,148 @@ export class MapView {
     }
   }
 
-  private buildingSpriteName(state: GameState, type: BuildingId): string {
-    if (type === 'hut') return eraOf(state) >= 2 ? 'hut1' : 'hut0';
+  /** Homes look like the place they stand in: huts in a camp, timber houses in a town, tall townhouses in a city. */
+  private buildingSpriteName(state: GameState, type: BuildingId, town?: number): string {
+    const tier = state.towns.find((t) => t.id === town)?.tier ?? 0;
+    if (type === 'hut') return eraOf(state) >= 2 || tier >= 2 ? 'hut1' : 'hut0';
+    if (type === 'house') return tier >= 3 ? 'house2' : 'house';
+    if (type === 'shrine') return 'temple';
     return type;
   }
 
-  private drawBuildingSprite(state: GameState, type: BuildingId, x: number, y: number, progress: number) {
+  /** Draw a building's picture over its footprint, rising from the ground as it is built (progress 0..1). */
+  private drawBuildingSprite(state: GameState, type: BuildingId, x: number, y: number, progress: number, town?: number) {
     const ctx = this.ctx;
-    if (type === 'monument') {
-      this.drawMonument(x, y, progress);
-      return;
-    }
-    const name = this.buildingSpriteName(state, type);
+    const [w, h] = sizeOf(type);
+    const X = x * TILE;
+    const Y = y * TILE;
     const season = seasonIndex(state.day);
-    const spr = type === 'farm' ? sprite('farm', FARM_PAL[season]) : sprite(name);
-    const X = x * TILE + Math.floor((TILE - spr.width) / 2);
-    const Y = y * TILE + TILE - spr.height;
-    if (progress >= 1) {
-      ctx.drawImage(spr, X, Y);
-    } else {
+    const sea = climateSeason(getMap(state.seed).biome[idx(x, y)], season);
+    const rise = (spr: HTMLCanvasElement, px: number, by: number) => {
       // Rising silhouette: draw the bottom portion according to progress.
-      const h = Math.max(1, Math.round(spr.height * progress));
-      ctx.drawImage(spr, 0, spr.height - h, spr.width, h, X, Y + spr.height - h, spr.width, h);
+      if (progress >= 1) return ctx.drawImage(spr, px, by - spr.height);
+      const hh = Math.max(1, Math.round(spr.height * progress));
+      ctx.drawImage(spr, 0, spr.height - hh, spr.width, hh, px, by - hh, spr.width, hh);
+    };
+    const bottom = Y + h * TILE;
+    switch (type) {
+      case 'monument': {
+        this.drawMonument(x + (w - 1) / 2, y + h - 1, progress);
+        return;
+      }
+      case 'farm': {
+        // Furrowed fields over the whole footprint.
+        const pal = FARM_PAL[sea];
+        const rows = Math.max(1, Math.round((h * TILE - 4) * Math.min(1, progress)));
+        ctx.fillStyle = '#1a1423';
+        ctx.fillRect(X + 1, bottom - rows - 3, w * TILE - 2, rows + 2);
+        ctx.fillStyle = pal.U;
+        ctx.fillRect(X + 2, bottom - rows - 2, w * TILE - 4, rows);
+        ctx.fillStyle = pal['1'];
+        for (let yy = bottom - rows - 1; yy < bottom - 2; yy += 2) for (let xx = X + 3; xx < X + w * TILE - 3; xx += 2) ctx.fillRect(xx, yy, 1, 1);
+        if (progress >= 1) {
+          // A scarecrow keeps watch.
+          ctx.fillStyle = '#5e3a22';
+          ctx.fillRect(X + w * TILE - 9, bottom - 14, 1, 9);
+          ctx.fillRect(X + w * TILE - 11, bottom - 11, 5, 1);
+          ctx.fillStyle = '#e9c046';
+          ctx.fillRect(X + w * TILE - 10, bottom - 16, 3, 2);
+        }
+        return;
+      }
+      case 'pasture': {
+        // A fenced paddock with a shelter in one corner.
+        if (progress >= 0.3) {
+          ctx.fillStyle = '#5e3a22';
+          ctx.fillRect(X + 1, Y + 6, w * TILE - 2, 1);
+          ctx.fillRect(X + 1, bottom - 2, w * TILE - 2, 1);
+          ctx.fillRect(X + 1, Y + 6, 1, h * TILE - 8);
+          ctx.fillRect(X + w * TILE - 2, Y + 6, 1, h * TILE - 8);
+          ctx.fillStyle = '#86532e';
+          for (let xx = X + 1; xx < X + w * TILE; xx += 5) {
+            ctx.fillRect(xx, Y + 4, 1, 3);
+            ctx.fillRect(xx, bottom - 4, 1, 3);
+          }
+        }
+        rise(sprite('pasture'), X + w * TILE - 16, Y + TILE + 2);
+        return;
+      }
+      case 'quarry':
+        rise(sprite('cut2'), X + 3, Y + 10);
+        rise(sprite('quarry'), X + 2, bottom);
+        rise(sprite('rock'), X + w * TILE - 10, bottom - 2);
+        return;
+      case 'lumber':
+        rise(sprite('lumber'), X, bottom);
+        rise(sprite('logs'), X + TILE + 4, bottom - 1);
+        return;
+      case 'storehouse':
+        rise(sprite('storehouse'), X, bottom);
+        rise(sprite('crates'), X + TILE + 4, bottom - 1);
+        return;
+      case 'smithy':
+        rise(sprite('smithy'), X, bottom);
+        rise(sprite('logs'), X + TILE + 3, bottom - 1);
+        return;
+      case 'library':
+        rise(sprite('library'), X, bottom);
+        rise(sprite('library'), X + TILE, bottom);
+        return;
+      default: {
+        const name = this.buildingSpriteName(state, type, town);
+        const spr = sprite(name);
+        rise(spr, X + Math.floor((w * TILE - spr.width) / 2), bottom);
+      }
     }
   }
 
   private drawBuilding(state: GameState, b: Building) {
     const ctx = this.ctx;
     const def = BUILDING_DEFS[b.type];
+    const [w, h] = sizeOf(b.type);
     const X = b.x * TILE;
     const Y = b.y * TILE;
     // Shadow
     ctx.fillStyle = 'rgba(10,8,20,0.22)';
-    ctx.fillRect(X + 2, Y + TILE - 2, TILE - 3, 2);
+    ctx.fillRect(X + 2, Y + h * TILE - 2, w * TILE - 3, 2);
     if (!b.done) {
-      const p = def.work > 0 ? b.progress / def.work : 0;
-      ctx.globalAlpha = 0.9;
-      this.drawBuildingSprite(state, b.type, b.x, b.y, Math.max(0.08, p));
-      ctx.globalAlpha = 1;
-      if (b.type !== 'monument') ctx.drawImage(sprite('site'), X, Y);
-      // progress bar
-      const bw = 12;
+      const stage = siteStage(state, b);
+      const total = def.work > 0 ? def.work : 1;
+      const p = stage === 'building' ? b.progress / total : 0;
+      if (stage === 'building') {
+        ctx.globalAlpha = 0.9;
+        this.drawBuildingSprite(state, b.type, b.x, b.y, Math.max(0.08, p), b.town);
+        ctx.globalAlpha = 1;
+      }
+      // Rock still to be levelled shows as rubble; felling shows on the trees themselves.
+      if (stage === 'levelling') for (const i of tilesOf(b)) ctx.drawImage(sprite('rock'), tx(i) * TILE + 2 + Math.floor(hash2(i, 1, 3) * 6), ty(i) * TILE + 7);
+      if (b.type !== 'monument') for (let k = 0; k < w; k++) ctx.drawImage(sprite('site'), X + k * TILE, Y + (h - 1) * TILE);
+      // Progress bar: green while felling, grey while levelling, gold while building.
+      const prepTotal = b.prepTotal ?? 0;
+      const prepLeft = fellLeft(state, b) + (b.prep ?? 0);
+      const frac = stage === 'building' ? p : prepTotal > 0 ? 1 - prepLeft / prepTotal : 0;
+      const bw = w * TILE - 4;
       ctx.fillStyle = '#1a1423';
       ctx.fillRect(X + 2, Y - 4, bw + 2, 3);
-      ctx.fillStyle = '#ffd25e';
-      ctx.fillRect(X + 3, Y - 3, Math.round(bw * p), 1);
+      ctx.fillStyle = stage === 'felling' ? '#7bc950' : stage === 'levelling' ? '#c3cad4' : '#ffd25e';
+      ctx.fillRect(X + 3, Y - 3, Math.round(bw * Math.max(0, Math.min(1, frac))), 1);
       return;
     }
     if (b.spent) {
       // Worked out: the pit is abandoned and weathering.
       ctx.globalAlpha = 0.55;
-      this.drawBuildingSprite(state, b.type, b.x, b.y, 1);
+      this.drawBuildingSprite(state, b.type, b.x, b.y, 1, b.town);
       ctx.globalAlpha = 1;
-      ctx.drawImage(sprite('rock'), X + 1, Y + 10);
+      ctx.drawImage(sprite('rock'), X + 1, Y + h * TILE - 6);
       return;
     }
-    this.drawBuildingSprite(state, b.type, b.x, b.y, 1);
-    if (b.type === 'campfire') this.drawFlames(X + 8, Y + 11);
+    this.drawBuildingSprite(state, b.type, b.x, b.y, 1, b.town);
+    if (b.type === 'campfire') {
+      this.drawFlames(X + 8, Y + 11);
+      // A well on the green once a camp becomes a village.
+      const t = state.towns.find((x) => x.id === b.town);
+      if (t && t.tier >= 1 && inBounds(b.x + 1, b.y - 1)) ctx.drawImage(sprite('well'), X + TILE + 4, Y - 2);
+    }
     if (b.type === 'smithy' && Math.sin(this.time * 9) > -0.2) {
       ctx.fillStyle = 'rgba(255,190,80,0.35)';
       ctx.fillRect(X + 3, Y + 9, 5, 3);
@@ -826,7 +1240,7 @@ export class MapView {
 
   private drawMonument(x: number, y: number, progress: number) {
     const ctx = this.ctx;
-    const cx = x * TILE + 8;
+    const cx = Math.round(x * TILE + 8);
     const base = y * TILE + TILE;
     const H = 58;
     const shown = Math.round(H * Math.min(1, progress));
