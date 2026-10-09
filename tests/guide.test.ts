@@ -8,7 +8,7 @@ import { decider } from './autoplayer';
 
 const TABS: Tab[] = ['decide', 'people', 'build', 'research', 'log'];
 /** Tips that only appear if something happens (an event, or something going wrong). */
-const CONTEXTUAL = new Set(['hunger', 'cold', 'event']);
+const CONTEXTUAL = new Set(['hunger', 'cold', 'event', 'land']);
 
 describe('a new player meets one system at a time', () => {
   it('starts with only the Decide tab and the Founding Way', () => {

@@ -1,11 +1,12 @@
 import { ADULT_AGE, DAYS_PER_YEAR, ELDER_AGE, MAP_H, MAP_W } from './data';
+import { initLand } from './land';
 import { getMap, idx, tx, ty } from './map';
 import { placeName, settlerName } from './names';
 import { Rng } from './rng';
 import type { GameState, JobId, Resources, Settler, TechId } from './types';
 import { JOBS, RESOURCES } from './types';
 
-export const SAVE_VERSION = 4;
+export const SAVE_VERSION = 5;
 
 export function emptyResources(): Resources {
   return Object.fromEntries(RESOURCES.map((r) => [r, 0])) as Resources;
@@ -52,6 +53,10 @@ export function newGame(seed: number, legacy = 0, now = Date.now()): GameState {
     lastSave: now,
     hunger: 0,
     cold: 0,
+    land: initLand(seed),
+    roads: [],
+    landEpoch: 0,
+    eff: {},
     guide: [],
     stats: {
       births: 0,

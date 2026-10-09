@@ -14,7 +14,7 @@ import {
 } from '../game/data';
 import { derived, jobUnlocked } from '../game/derived';
 import { ageOf, eraOf, seasonIndex, year } from '../game/state';
-import { buildMaterials, buildWork, careLevel, gathererCapacity, materialLimit, moraleTarget, popSummary, productivity, toolBonus } from '../game/sim';
+import { buildMaterials, buildWork, careLevel, gathererCapacity, materialLimit, moraleTarget, popSummary, productivity, toolBonus, yieldEff } from '../game/sim';
 import { councilWish } from '../game/council';
 import { PIN_UNLOCK } from '../game/decisions';
 import { tabRevealed, type Tab } from '../game/reveal';
@@ -343,6 +343,14 @@ export class Panels {
     const def = JOB_DEFS[j];
     let extra = '';
     if (j === 'gatherer') extra = `<div class="sep"></div><span class="muted">The land around you supports about ${gathererCapacity(s)} gatherers before yields drop. Berry thickets and fishing waters in your territory raise this.</span>`;
+    const landNote: Partial<Record<JobId, string>> = {
+      woodcutter: 'the woods near the camps are felled; they regrow in a few years, or a new camp can open in fresh forest',
+      hunter: 'the herds nearby are hunted thin; they recover if left alone, and pastures breed animals instead',
+      quarrier: 'the quarries are running out of rock',
+      miner: 'the mines are running out of ore',
+    };
+    const eff = yieldEff(s, j);
+    if (landNote[j] && eff < 0.95 && popSummary(s).jobs[j] > 0) extra += `<div class="sep"></div><span style="color:var(--bad)">Only ${Math.round(eff * 100)}% of a full yield: ${landNote[j]}.</span>`;
     if (def.usesTools) extra += `<div class="sep"></div><span class="muted">Tools in stock: ${toolBonus(s) > 1 ? `<b style="color:var(--good)">+${Math.round((toolBonus(s) - 1) * 100)}% output</b>` : 'none (no bonus)'}</span>`;
     if (def.input) extra += `<div class="sep"></div><span class="muted">Consumes ${Object.entries(def.input).map(([k, v]) => `${v} ${k}`).join(' + ')} per smith per day.</span>`;
     return `<h4>${def.name}</h4>${def.desc}${extra}<div class="sep"></div><span class="muted">Morale: ×${productivity(s).toFixed(2)} output</span>`;

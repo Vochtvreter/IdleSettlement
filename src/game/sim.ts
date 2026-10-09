@@ -9,6 +9,7 @@ import {
   MAP_W,
 } from './data';
 import { derived, invalidate, jobUnlocked } from './derived';
+import { drawFrom, growLand, landFrac, landMax } from './land';
 import { runCouncil } from './council';
 import { fxAdd, fxMul } from './decisions';
 import { resolveChoice, rollEvent } from './events';
@@ -16,7 +17,7 @@ import { getMap, idx, inBounds, N4, tx, ty } from './map';
 import { checkObjectives } from './objectives';
 import { Rng } from './rng';
 import { ageOf, eraOf, hasTech, makeSettler, seasonIndex } from './state';
-import type { BuildingId, FxEvent, GameState, JobId, LogEntry, Rates, ResourceId, Settler } from './types';
+import type { BuildingId, FxEvent, GameState, JobId, LandLayer, LogEntry, Rates, ResourceId, Settler } from './types';
 import { F, JOBS, RESOURCES } from './types';
 
 export interface TickContext {
@@ -155,17 +156,80 @@ export function slotMult(state: GameState, j: JobId, n: number): number {
   return sum / n;
 }
 
-function featuresInTerritory(state: GameState, f: F): number {
+/**
+ * Foraging: the open land feeds about ten gatherers; each berry thicket and fishing water in your
+ * territory feeds two more while it is full, less as it is picked or fished out.
+ */
+export function forage(state: GameState) {
   const map = getMap(state.seed);
   const terr = derived(state).territory;
-  let n = 0;
-  for (let i = 0; i < map.feature.length; i++) if (map.feature[i] === f && terr[i] && state.explored[i]) n++;
-  return n;
+  const fx = fxMul(state, 'forage');
+  const tiles: number[] = [];
+  let feat = 0;
+  for (const i of landMax(state.seed).lifeTiles) {
+    const f = map.feature[i];
+    if ((f !== F.Berries && f !== F.Fish) || !terr[i] || !state.explored[i]) continue;
+    tiles.push(i);
+    feat += 2 * landFrac(state, 'life', i);
+  }
+  return { base: 10 * fx, feat: feat * fx, tiles };
 }
 
 export function gathererCapacity(state: GameState) {
-  return Math.round((10 + 2 * featuresInTerritory(state, F.Berries) + 2 * featuresInTerritory(state, F.Fish)) * fxMul(state, 'forage'));
+  const f = forage(state);
+  return Math.round(f.base + f.feat);
 }
+
+/** Workers of a job per building, best buildings first (as slotMult assumes). */
+export function allocation(state: GameState, j: JobId, n: number) {
+  const out: { building: number | null; count: number; mult: number }[] = [];
+  let left = n;
+  for (const g of derived(state).slotGroups[j]) {
+    if (left <= 0) break;
+    const k = Math.min(left, g.count);
+    out.push({ building: g.building, count: k, mult: g.mult });
+    left -= k;
+  }
+  return out;
+}
+
+/** Share of a job's full output the land currently supports (1 = plenty). */
+export function yieldEff(state: GameState, j: JobId) {
+  return state.eff?.[j] ?? 1;
+}
+
+/**
+ * Output of an extracting job, taken from the land around each workplace. What the land cannot
+ * supply is replaced by `fallback` of it (deadwood, small game). Nothing is taken once the stores are full.
+ */
+function extract(state: GameState, j: JobId, n: number, season: number, layer: LandLayer, perUnit: number, room: number, fallback: number, minShare = 0) {
+  if (n <= 0) return { got: 0, full: 0 };
+  const full = jobOutput(state, j, n, season) * baseRate(j);
+  const want = Math.min(full, Math.max(0, room, full * minShare));
+  if (want <= 0.0001) return { got: 0, full };
+  const d = derived(state);
+  const groups = allocation(state, j, n);
+  const weight = groups.reduce((s, g) => s + g.count * g.mult, 0) || 1;
+  let got = 0;
+  for (const g of groups) {
+    const share = (want * g.count * g.mult) / weight;
+    const tiles = g.building !== null ? (d.catchments[layer].get(g.building) ?? []) : [];
+    const taken = drawFrom(state, layer, tiles, share * perUnit) / perUnit;
+    got += taken + (share - taken) * fallback;
+  }
+  state.eff[j] = yieldEff(state, j) * 0.9 + (got / want) * 0.1;
+  return { got, full };
+}
+
+/** Food and hides from the herds bred on pastures. */
+export function pastureYield(state: GameState, season: number) {
+  let herd = 0;
+  for (const b of state.buildings) if (b.type === 'pasture' && b.done) herd += (b.stock ?? 4) / PASTURE_HERD;
+  const pm = legacyMult(state) * fxMul(state, 'pasture');
+  return { food: herd * 1.8 * (season === 3 ? 0.6 : 1) * pm, hides: herd * 0.15 * pm };
+}
+
+export const PASTURE_HERD = 12;
 
 /** Assign adults to jobs according to targets and available slots. Keeps existing assignments stable. */
 export function assignJobs(state: GameState) {
@@ -295,26 +359,49 @@ export function tick(state: GameState, ctx: TickContext) {
     add(rates, 'prod', r, src, amt);
   };
 
+  // --- needs (computed first so workers stop taking from the land once the stores are full)
+  const foodNeed = foodDemand(state, pop);
+  let heatNeed = 0;
+  if (season === 3) {
+    const stoneFrac = Math.min(1, d.stoneHousing / Math.max(1, pop.total));
+    heatNeed = pop.total * 0.13 * (hasTech(state, 'furs') ? 0.6 : 1) * (1 - 0.5 * stoneFrac) * modMult(state, 'heating');
+  }
+  const room = (r: ResourceId, use = 0) => d.caps[r] - state.res[r] - (gain[r] ?? 0) + use + 1;
+
   // --- production
   {
+    // Gatherers: the open land feeds a few; berry thickets and fishing waters feed more until picked out.
     const n = jobs.gatherer;
-    const cap = gathererCapacity(state);
-    const eff = n <= cap ? n : cap + (n - cap) * 0.4;
+    const fo = forage(state);
+    const onBase = Math.min(n, fo.base);
+    let onFeat = Math.min(n - onBase, fo.feat);
+    const over = n - onBase - onFeat;
+    if (onFeat > 0) onFeat = drawFrom(state, 'life', fo.tiles, onFeat * 0.8) / 0.8;
+    const eff = onBase + onFeat + Math.max(0, over) * 0.4;
     produce('food', 'Gatherers', out('gatherer', 1) * eff * 1.8);
   }
   produce('food', 'Idle foragers', pop.idle * 0.45 * (SEASON_MULT.gatherer![season]) * prodMult);
-  produce('food', 'Hunters', out('hunter', jobs.hunter) * 1.7);
-  produce('hides', 'Hunters', out('hunter', jobs.hunter) * 0.14 * (1 / Math.max(0.3, SEASON_MULT.hunter![season])));
   produce('food', 'Farmers', out('farmer', jobs.farmer) * 4.2);
-  produce('wood', 'Woodcutters', out('woodcutter', jobs.woodcutter) * 0.9);
-  produce('stone', 'Quarriers', out('quarrier', jobs.quarrier) * 0.6);
-  produce('ore', 'Miners', out('miner', jobs.miner) * 0.38);
-  const pastures = d.counts.pasture ?? 0;
-  if (pastures) {
-    const pm = legacyMult(state) * fxMul(state, 'pasture');
-    produce('food', 'Pastures', pastures * 1.6 * (season === 3 ? 0.6 : 1) * pm);
-    produce('hides', 'Pastures', pastures * 0.15 * pm);
+  // Pastures: the herd grows through the warm seasons and its surplus is eaten.
+  for (const b of state.buildings) {
+    if (b.type !== 'pasture' || !b.done) continue;
+    b.stock ??= 4;
+    if (season < 3) b.stock = Math.min(PASTURE_HERD, b.stock + 0.06 * b.stock * (1 - b.stock / PASTURE_HERD));
   }
+  const py = pastureYield(state, season);
+  if (py.food) {
+    produce('food', 'Pastures', py.food);
+    produce('hides', 'Pastures', py.hides);
+  }
+  {
+    // Hunters take from the wild herds near their lodge; small game makes up a little when herds are thin.
+    const h = extract(state, 'hunter', jobs.hunter, season, 'life', 0.1, room('food', foodNeed), 0.4, 0.25);
+    produce('food', 'Hunters', h.got);
+    if (h.full > 0) produce('hides', 'Hunters', (h.got / 1.7) * 0.14 * (1 / Math.max(0.3, SEASON_MULT.hunter![season])));
+  }
+  produce('wood', 'Woodcutters', extract(state, 'woodcutter', jobs.woodcutter, season, 'wood', 1, room('wood', heatNeed + jobs.smith * 0.25), 0.2).got);
+  produce('stone', 'Quarriers', extract(state, 'quarrier', jobs.quarrier, season, 'stone', 1, room('stone'), 0).got);
+  produce('ore', 'Miners', extract(state, 'miner', jobs.miner, season, 'ore', 1, room('ore', jobs.smith * 0.4), 0).got);
   {
     // Smiths are limited by ore and wood on hand.
     const want = out('smith', jobs.smith);
@@ -338,15 +425,20 @@ export function tick(state: GameState, ctx: TickContext) {
     produce('knowledge', 'Elders', elderK);
   }
 
-  // --- consumption
-  const foodNeed = foodDemand(state, pop);
-  add(rates, 'cons', 'food', 'Eating', foodNeed);
-  let heatNeed = 0;
-  if (season === 3) {
-    const stoneFrac = Math.min(1, d.stoneHousing / Math.max(1, pop.total));
-    heatNeed = pop.total * 0.13 * (hasTech(state, 'furs') ? 0.6 : 1) * (1 - 0.5 * stoneFrac) * modMult(state, 'heating');
-    add(rates, 'cons', 'wood', 'Firewood', heatNeed);
+  // --- the land: worked-out quarries and mines, and regrowth
+  {
+    const dd = derived(state);
+    for (const b of state.buildings) {
+      if (b.spent || !dd.spent.has(b.id)) continue;
+      b.spent = true;
+      log(state, `The ${BUILDING_DEFS[b.type].name.toLowerCase()} at ${b.x},${b.y} has been worked out. Its workers must dig elsewhere.`, 'bad');
+    }
+    growLand(state, season, { replant: dd.replant, occupied: dd.occupied, regrow: fxMul(state, 'regrow'), replanting: fxMul(state, 'replant') > 0 });
   }
+
+  // --- consumption
+  add(rates, 'cons', 'food', 'Eating', foodNeed);
+  if (heatNeed) add(rates, 'cons', 'wood', 'Firewood', heatNeed);
   const toolUsers = JOBS.filter((j) => JOB_DEFS[j].usesTools).reduce((s, j) => s + jobs[j], 0);
   const toolWear = state.res.tools >= 1 ? toolUsers * 0.006 * fxMul(state, 'toolWear') : 0;
   if (toolWear) add(rates, 'cons', 'tools', 'Wear', toolWear);

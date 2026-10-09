@@ -16,14 +16,15 @@ import {
   TERRAIN_NAMES,
 } from '../game/data';
 import { buildingMult, canPlace, derived } from '../game/derived';
+import { isGreen, landMax, layerSum, LIFE_FLOOR, wooded } from '../game/land';
 import { getMap, tx, ty } from '../game/map';
 import { objectiveProgress } from '../game/objectives';
 import { exportSave, importSave, type OfflineReport } from '../game/save';
 import { dayOfSeason, eraOf, hasTech, seasonIndex, year } from '../game/state';
-import { buildWork, materialLimit, popSummary } from '../game/sim';
+import { buildWork, materialLimit, PASTURE_HERD, popSummary } from '../game/sim';
 import { MILESTONES, milestoneUnlocks } from '../game/decisions';
 import { pendingDecision } from './decide';
-import type { BuildingId, FxEvent, GameState, LogEntry, ResourceId } from '../game/types';
+import type { Building, BuildingId, FxEvent, GameState, LogEntry, ResourceId } from '../game/types';
 import { F, RESOURCES } from '../game/types';
 import { sfx, setSoundEnabled, soundEnabled } from './audio';
 import { costEl, fmt, fmtRate, h, hideTip, img, RES_ICON, tip } from './dom';
@@ -352,6 +353,7 @@ export class UI {
       const mult = buildingMult(s, b);
       if (Math.abs(mult - 1) > 0.001) parts.push(h('div', { class: 'row' }, 'Location bonus', h('b', null, `+${Math.round((mult - 1) * 100)}%`)));
       for (const [r, n] of Object.entries(def.storage ?? {})) parts.push(h('div', { class: 'row' }, `${RESOURCE_DEFS[r as ResourceId].name} storage`, h('b', null, `+${n}`)));
+      if (b.done) parts.push(...this.landRows(s, b));
       if (!b.done && def.materials) {
         const stalled = materialLimit(s, b.type) < 0.01;
         parts.push(h('div', { class: 'row' }, 'Materials', h('b', { style: stalled ? 'color:var(--bad)' : '' }, stalled ? 'waiting…' : 'flowing')));
@@ -391,13 +393,14 @@ export class UI {
       parts.push(h('div', { class: 'ih' }, img(fname ? (f === F.Ore ? 'i_ore' : f === F.Berries ? 'berries' : f === F.Ruins ? 'ruins' : f === F.Grove ? 'grove' : 'i_star') : 'i_house', 3), h('div', null, h('div', { class: 'tt' }, fname || TERRAIN_NAMES[t]), h('div', { class: 'ts' }, `${fname ? TERRAIN_NAMES[t] + ' · ' : ''}${d.territory[tile] ? 'Your territory' : 'Wilderness'} · ${x}, ${y}`))));
       const featureDesc: Record<number, string> = {
         [F.Berries]: 'Berry thickets inside your territory let more gatherers work efficiently.',
-        [F.Game]: 'Hunting lodges within 3 tiles get +30% per herd.',
-        [F.Ore]: 'Build a Mine right here for double output.',
+        [F.Game]: 'Hunting lodges within 3 tiles get +30% per herd. Hunted hard, a herd dwindles and takes years to recover.',
+        [F.Ore]: 'A Mine on or beside this vein yields double, until the vein runs dry.',
         [F.Ruins]: claimed ? 'The ruins have been studied.' : '',
         [F.Grove]: 'A sacred place. It lifts the spirits of your people.',
         [F.Fish]: 'Fishing waters inside your territory let more gatherers work efficiently.',
       };
       if (fname && featureDesc[f]) parts.push(h('div', { class: 'desc' }, featureDesc[f]));
+      parts.push(...this.tileRows(s, tile));
       if (this.game.view.placing) {
         const c = canPlace(s, this.game.view.placing, tile);
         parts.push(h('div', { class: 'row' }, BUILDING_DEFS[this.game.view.placing].name, h('b', { style: c.ok ? '' : 'color:var(--bad)' }, c.ok ? (c.mult > 1.001 ? `OK · +${Math.round((c.mult - 1) * 100)}% bonus` : 'OK') : c.reason)));
@@ -405,6 +408,55 @@ export class UI {
     }
     el.replaceChildren(...parts.filter(Boolean) as HTMLElement[]);
     el.classList.remove('hidden');
+  }
+
+  /** What a bare tile still holds: timber, stone, ore or wildlife, and whether it carries a road. */
+  private tileRows(s: GameState, tile: number): HTMLElement[] {
+    const m = landMax(s.seed);
+    const d = derived(s);
+    const map = getMap(s.seed);
+    const out: HTMLElement[] = [];
+    const row = (label: string, value: string, bad = false) => out.push(h('div', { class: 'row' }, label, h('b', { style: bad ? 'color:var(--bad)' : '' }, value)));
+    if (s.roads.includes(tile)) row('Road', 'kept clear');
+    else if (isGreen(s, tile)) row('Village green', 'kept open');
+    if (m.wood[tile]) {
+      const w = s.land.wood[tile];
+      const state = d.occupied[tile] ? 'cleared' : w >= m.wood[tile] - 0.01 ? 'old growth' : wooded(s, tile) ? (d.replant[tile] ? 'regrowing, tended' : 'regrowing') : d.replant[tile] ? 'felled, replanted' : 'felled';
+      row('Timber', `${Math.round(w)}/${m.wood[tile]} · ${state}`, !wooded(s, tile) && !d.occupied[tile]);
+    }
+    if (m.stone[tile]) row('Stone left', `${Math.round(s.land.stone[tile])}/${m.stone[tile]}`, s.land.stone[tile] <= 0);
+    if (m.ore[tile] && (map.feature[tile] === F.Ore || s.land.ore[tile] < m.ore[tile])) row('Ore left', `${Math.round(s.land.ore[tile])}/${m.ore[tile]}`, s.land.ore[tile] <= 0);
+    if (m.life[tile]) {
+      const pct = Math.round((s.land.life[tile] / m.life[tile]) * 100);
+      const label = map.feature[tile] === F.Game ? 'Herd' : map.feature[tile] === F.Fish ? 'Fish' : 'Berries';
+      row(label, `${pct}%${pct <= LIFE_FLOOR * 100 + 1 ? ' · hunted out' : ''}`, pct < 40);
+    }
+    return out;
+  }
+
+  /** How much a workplace still has to work with. */
+  private landRows(s: GameState, b: Building): HTMLElement[] {
+    const d = derived(s);
+    const out: HTMLElement[] = [];
+    const row = (label: string, value: string, bad = false) => out.push(h('div', { class: 'row' }, label, h('b', { style: bad ? 'color:var(--bad)' : '' }, value)));
+    const sum = (layer: 'wood' | 'stone' | 'ore' | 'life') => layerSum(s, layer, d.catchments[layer].get(b.id) ?? []);
+    if (b.type === 'lumber' || b.type === 'campfire') {
+      const tiles = d.catchments.wood.get(b.id) ?? [];
+      const standing = tiles.filter((i) => wooded(s, i)).length;
+      row('Timber nearby', `${Math.round(sum('wood'))} · ${standing} stand${standing === 1 ? '' : 's'}`, standing === 0);
+    }
+    if (b.type === 'quarry') row('Stone left', b.spent ? 'worked out' : fmt(sum('stone')), !!b.spent);
+    if (b.type === 'mine') row('Ore left', b.spent ? 'worked out' : fmt(sum('ore')), !!b.spent);
+    if (b.type === 'lodge' || b.type === 'campfire') {
+      const tiles = d.catchments.life.get(b.id) ?? [];
+      if (tiles.length) {
+        const max = landMax(s.seed).life;
+        const pct = Math.round((sum('life') / tiles.reduce((a, i) => a + max[i], 0)) * 100);
+        row('Game nearby', `${tiles.length} herd${tiles.length > 1 ? 's' : ''} · ${pct}%`, pct < 40);
+      } else if (b.type === 'lodge') row('Game nearby', 'no herds, small game only', true);
+    }
+    if (b.type === 'pasture') row('Herd', `${Math.round(b.stock ?? 4)}/${PASTURE_HERD}`);
+    return out;
   }
 
   tileClick(tile: number, shiftHeld: boolean) {

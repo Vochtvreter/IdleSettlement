@@ -1,5 +1,7 @@
 import { MAP_H, MAP_W } from './data';
 import { invalidate } from './derived';
+import { initLand, landMax, layRoad, packLand, roadPath, unpackLand } from './land';
+import { idx } from './map';
 import { SAVE_VERSION } from './state';
 import { emptyRates, tick, type TickContext } from './sim';
 import type { FxEvent, GameState, ResourceId } from './types';
@@ -51,15 +53,38 @@ function unpackExplored(s: string) {
 }
 
 export function serialize(state: GameState): string {
-  return JSON.stringify({ ...state, explored: packExplored(state.explored) });
+  return JSON.stringify({ ...state, explored: packExplored(state.explored), land: packLand(state) });
+}
+
+/** Saves from before the land could be used up: start from untouched land and lay roads to every building. */
+function migrateV4(raw: GameState) {
+  raw.version = SAVE_VERSION;
+  raw.land = initLand(raw.seed);
+  raw.roads = [];
+  raw.landEpoch = 0;
+  raw.eff = {};
+  const wood = landMax(raw.seed).wood;
+  for (const b of raw.buildings) if (wood[idx(b.x, b.y)]) raw.land.wood[idx(b.x, b.y)] = 0;
+  for (const b of raw.buildings) {
+    if (b.type === 'campfire') continue;
+    const path = roadPath(raw, idx(b.x, b.y));
+    if (path) layRoad(raw, path);
+  }
 }
 
 export function deserialize(json: string): GameState | null {
   try {
     const raw = JSON.parse(json);
-    if (!raw || typeof raw !== 'object' || raw.version !== SAVE_VERSION) return null;
+    if (!raw || typeof raw !== 'object' || (raw.version !== SAVE_VERSION && raw.version !== 4)) return null;
     raw.explored = typeof raw.explored === 'string' ? unpackExplored(raw.explored) : raw.explored;
     for (const r of RESOURCES) if (typeof raw.res[r] !== 'number' || !isFinite(raw.res[r])) raw.res[r] = 0;
+    if (raw.version === 4) migrateV4(raw);
+    else {
+      raw.land = unpackLand(raw.seed, raw.land ?? {});
+      raw.roads ??= [];
+      raw.landEpoch ??= 0;
+      raw.eff ??= {};
+    }
     return raw as GameState;
   } catch {
     return null;

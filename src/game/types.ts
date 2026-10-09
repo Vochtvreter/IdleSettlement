@@ -35,6 +35,7 @@ export type BuildingId =
   | 'library'
   | 'house'
   | 'shrine'
+  | 'bridge'
   | 'monument';
 
 export type TechId =
@@ -108,7 +109,21 @@ export interface Building {
   /** Work points invested. Complete when `done`. */
   progress: number;
   done: boolean;
+  /** Pastures: the size of the herd bred there. */
+  stock?: number;
+  /** Quarries and mines whose ground has been worked out. */
+  spent?: boolean;
 }
+
+/** What is left of the land's natural resources, per tile. Wood regrows, stone and ore do not, wildlife breeds. */
+export interface Land {
+  wood: number[];
+  stone: number[];
+  ore: number[];
+  /** Game herds, fishing waters and berry thickets. */
+  life: number[];
+}
+export type LandLayer = keyof Land;
 
 export interface LogEntry {
   day: number;
@@ -195,6 +210,13 @@ export interface GameState {
   /** Sustained-shortage trackers (0..1) used for hunger/cold. */
   hunger: number;
   cold: number;
+  land: Land;
+  /** Tiles that carry a road (the village green around the hearth is implicit). */
+  roads: number[];
+  /** Bumped whenever the land changes in a way that affects building rules or slots. */
+  landEpoch: number;
+  /** Smoothed share of the full output each job actually achieved, given what the land had left. */
+  eff: Partial<Record<JobId, number>>;
   /** Guide tips already shown. Missing on saves from before the guide existed (treated as all seen). */
   guide?: string[];
 }

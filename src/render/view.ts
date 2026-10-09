@@ -1,5 +1,6 @@
 import { BUILDING_DEFS, FEATURE_NAMES, MAP_H, MAP_W } from '../game/data';
 import { canPlace, derived } from '../game/derived';
+import { landMax } from '../game/land';
 import { getMap, idx, inBounds, isWater, tx, ty } from '../game/map';
 import { hash2 } from '../game/rng';
 import { eraOf, seasonIndex } from '../game/state';
@@ -7,7 +8,7 @@ import type { Building, BuildingId, FxEvent, GameState } from '../game/types';
 import { F } from '../game/types';
 import { Actors, jobColor } from './actors';
 import { makeCanvas, sprite } from './sprites';
-import { TILE, terrainCanvas, TREE_PAL } from './terrain';
+import { ForestLayer, TILE, terrainCanvas, TREE_PAL } from './terrain';
 
 const ZOOMS = [1, 2, 3, 4, 5, 6];
 
@@ -38,6 +39,10 @@ export class MapView {
   private placeKey = '';
   private placeValid = new Map<number, number>();
   private borderKey = '';
+  private netKey = '';
+  private forest = new ForestLayer();
+  /** Per tile: 1 road, 2 village green, 3 bridge, 4 building. */
+  private net = new Uint8Array(MAP_W * MAP_H);
   private border: [number, number, number, number][] = [];
   private lastSeason = -1;
   private seasonFade = 1;
@@ -69,6 +74,7 @@ export class MapView {
     this.fogKey = '';
     this.placeKey = '';
     this.borderKey = '';
+    this.netKey = '';
     this.lastSeason = -1;
     const h = state.buildings.find((b) => b.type === 'campfire')!;
     this.centerOn(h.x + 0.5, h.y + 0.5);
@@ -330,13 +336,13 @@ export class MapView {
   private updatePlacement(state: GameState) {
     if (!this.placing) return;
     const d = derived(state);
-    const key = `${this.placing}:${state.buildings.length}:${d.sites.length}:${state.stats.tilesExplored}:${state.nextBuildingId}`;
+    const key = `${this.placing}:${state.buildings.length}:${d.sites.length}:${state.stats.tilesExplored}:${state.nextBuildingId}:${state.landEpoch}:${state.roads.length}`;
     if (key === this.placeKey) return;
     this.placeKey = key;
     this.placeValid.clear();
     for (let i = 0; i < MAP_W * MAP_H; i++) {
       if (!d.territory[i]) continue;
-      const c = canPlace(state, this.placing, i);
+      const c = canPlace(state, this.placing, i, d);
       if (c.ok) this.placeValid.set(i, c.mult);
     }
   }
@@ -412,6 +418,17 @@ export class MapView {
         }
       }
 
+    // Roads, the village green, bridges and worked hillsides lie on the ground under everything else.
+    this.drawGround(state, vx0, vy0, vx1, vy1);
+    // Then the woods as they stand today.
+    const occupied = derived(state).occupied;
+    if (this.seasonFade < 1) {
+      ctx.drawImage(this.forest.canvas(state, this.prevSeason, occupied), 0, 0);
+      ctx.globalAlpha = this.seasonFade;
+    }
+    ctx.drawImage(this.forest.canvas(state, season, occupied), 0, 0);
+    ctx.globalAlpha = 1;
+
     // Territory border
     this.updateBorder(state);
     ctx.save();
@@ -451,10 +468,11 @@ export class MapView {
         if (!f || f === F.Berries || f === F.Game || f === F.Fish) continue;
         if (!state.explored[i]) continue;
         if ((f === F.Tribe || f === F.Cache) && claimed.has(i)) continue;
+        if (f === F.Ore && state.land.ore[i] <= 0) continue;
         items.push({ y: y + 0.9, draw: () => this.drawFeature(f, x, y) });
       }
     for (const b of state.buildings) {
-      if (!visible(b.x, b.y)) continue;
+      if (!visible(b.x, b.y) || b.type === 'bridge') continue;
       items.push({ y: b.y + 0.95, draw: () => this.drawBuilding(state, b) });
     }
     for (const w of this.actors.walkers.values()) {
@@ -523,6 +541,151 @@ export class MapView {
       } else {
         outline(this.hoverTile, 'rgba(255,255,255,0.55)');
       }
+    }
+  }
+
+  /** Which tiles carry roads, the green, bridges and buildings (what a road may join up with). */
+  private updateNet(state: GameState) {
+    const key = `${state.roads.length}:${state.buildings.length}:${state.nextBuildingId}`;
+    if (key === this.netKey) return;
+    this.netKey = key;
+    const net = this.net;
+    net.fill(0);
+    const map = getMap(state.seed);
+    for (const i of state.roads) net[i] = 1;
+    const h = state.buildings.find((b) => b.type === 'campfire')!;
+    for (let dy = -1; dy <= 1; dy++)
+      for (let dx = -1; dx <= 1; dx++) {
+        if (!inBounds(h.x + dx, h.y + dy)) continue;
+        const i = idx(h.x + dx, h.y + dy);
+        const t = map.terrain[i];
+        if (!isWater(t) && t !== 8 && t !== 9) net[i] = 2;
+      }
+    for (const b of state.buildings) net[idx(b.x, b.y)] = b.type === 'bridge' ? 3 : b.type === 'campfire' ? 2 : 4;
+  }
+
+  private drawGround(state: GameState, vx0: number, vy0: number, vx1: number, vy1: number) {
+    const ctx = this.ctx;
+    this.updateNet(state);
+    const net = this.net;
+    const season = seasonIndex(state.day);
+    const era = eraOf(state);
+    const paved = era >= 3;
+    const fill = season === 3 ? (paved ? '#cfcac2' : '#cdbfa8') : paved ? '#b3ab9d' : '#b8935f';
+    const edge = season === 3 ? '#a59a8a' : paved ? '#7f786c' : '#8a6a42';
+    const x0 = Math.max(0, vx0);
+    const y0 = Math.max(0, vy0);
+    const x1 = Math.min(MAP_W, vx1);
+    const y1 = Math.min(MAP_H, vy1);
+    const linked = (x: number, y: number) => inBounds(x, y) && net[idx(x, y)] > 0;
+
+    // The village green: packed earth around the hearth.
+    for (let y = y0; y < y1; y++)
+      for (let x = x0; x < x1; x++) {
+        if (net[idx(x, y)] !== 2) continue;
+        const X = x * TILE;
+        const Y = y * TILE;
+        ctx.fillStyle = fill;
+        ctx.fillRect(X, Y, TILE, TILE);
+        ctx.fillStyle = edge;
+        const green = (xx: number, yy: number) => inBounds(xx, yy) && net[idx(xx, yy)] === 2;
+        if (!green(x, y - 1)) ctx.fillRect(X, Y, TILE, 1);
+        if (!green(x, y + 1)) ctx.fillRect(X, Y + TILE - 1, TILE, 1);
+        if (!green(x - 1, y)) ctx.fillRect(X, Y, 1, TILE);
+        if (!green(x + 1, y)) ctx.fillRect(X + TILE - 1, Y, 1, TILE);
+      }
+
+    // Roads: a track 6px wide, joined to every neighbouring road, bridge, building or the green.
+    const roads: number[] = [];
+    for (const i of state.roads) {
+      const x = tx(i);
+      const y = ty(i);
+      if (x >= x0 - 1 && x <= x1 && y >= y0 - 1 && y <= y1) roads.push(i);
+    }
+    for (const pass of [0, 1]) {
+      ctx.fillStyle = pass ? fill : edge;
+      const g = pass ? 0 : 1;
+      for (const i of roads) {
+        const x = tx(i);
+        const y = ty(i);
+        const X = x * TILE + 5;
+        const Y = y * TILE + 5;
+        ctx.fillRect(X - g, Y - g, 6 + 2 * g, 6 + 2 * g);
+        if (linked(x, y - 1)) ctx.fillRect(X - g, y * TILE, 6 + 2 * g, 5);
+        if (linked(x, y + 1)) ctx.fillRect(X - g, Y + 6, 6 + 2 * g, 5);
+        if (linked(x - 1, y)) ctx.fillRect(x * TILE, Y - g, 5, 6 + 2 * g);
+        if (linked(x + 1, y)) ctx.fillRect(X + 6, Y - g, 5, 6 + 2 * g);
+      }
+    }
+    ctx.fillStyle = edge;
+    for (const i of roads) {
+      const x = tx(i);
+      const y = ty(i);
+      for (let k = 0; k < 3; k++) {
+        const hh = hash2(x * 7 + k, y * 13, 5);
+        if (hh > (paved ? 0.2 : 0.6)) ctx.fillRect(x * TILE + 5 + Math.floor(hash2(x, y, 20 + k) * 6), y * TILE + 5 + Math.floor(hash2(x, y, 30 + k) * 6), 1, 1);
+      }
+    }
+
+    // Bridges across rivers.
+    for (const b of state.buildings) {
+      if (b.type !== 'bridge' || b.x < x0 - 1 || b.x > x1 || b.y < y0 - 1 || b.y > y1) continue;
+      this.drawBridge(state, b, paved);
+    }
+
+    // Hillsides cut back by quarrying.
+    const stone = landMax(state.seed).stone;
+    const cutPal = season === 3 ? { W: '#ffffff', g: '#d4d9de' } : undefined;
+    const cut1 = sprite('cut1', cutPal);
+    const cut2 = sprite('cut2', cutPal);
+    for (let y = y0; y < y1; y++)
+      for (let x = x0; x < x1; x++) {
+        const i = idx(x, y);
+        if (!stone[i] || net[i] === 4) continue;
+        const frac = state.land.stone[i] / stone[i];
+        if (frac > 0.9) continue;
+        const spr = frac > 0.4 ? cut1 : cut2;
+        ctx.drawImage(spr, x * TILE + Math.floor((TILE - spr.width) / 2), y * TILE + 9 - Math.floor(spr.height / 2));
+      }
+  }
+
+  private drawBridge(state: GameState, b: Building, paved: boolean) {
+    const ctx = this.ctx;
+    const map = getMap(state.seed);
+    const water = (x: number, y: number) => !inBounds(x, y) || (isWater(map.terrain[idx(x, y)]) && this.net[idx(x, y)] !== 3);
+    // Span the way the banks lie: toward the sides with land (or more bridge).
+    const landLR = (water(b.x - 1, b.y) ? 0 : 1) + (water(b.x + 1, b.y) ? 0 : 1);
+    const landUD = (water(b.x, b.y - 1) ? 0 : 1) + (water(b.x, b.y + 1) ? 0 : 1);
+    const horizontal = landLR >= landUD;
+    const p = b.done ? 1 : Math.max(0.1, b.progress / BUILDING_DEFS.bridge.work);
+    const deck = paved ? '#bdb5a8' : '#9a6436';
+    const plank = paved ? '#8f887c' : '#6e4426';
+    const rail = paved ? '#77706a' : '#5e3a22';
+    const X = b.x * TILE;
+    const Y = b.y * TILE;
+    ctx.save();
+    if (!horizontal) {
+      ctx.translate(X + TILE / 2, Y + TILE / 2);
+      ctx.rotate(Math.PI / 2);
+      ctx.translate(-X - TILE / 2, -Y - TILE / 2);
+    }
+    const len = Math.round(TILE * p);
+    ctx.fillStyle = 'rgba(10,20,40,0.28)';
+    ctx.fillRect(X, Y + 12, len, 2);
+    ctx.fillStyle = deck;
+    ctx.fillRect(X, Y + 4, len, 8);
+    ctx.fillStyle = plank;
+    for (let k = 1; k < len; k += 3) ctx.fillRect(X + k, Y + 4, 1, 8);
+    ctx.fillStyle = rail;
+    ctx.fillRect(X, Y + 3, len, 1);
+    ctx.fillRect(X, Y + 12, len, 1);
+    for (const px of [1, 7, 13]) if (px < len) ctx.fillRect(X + px, Y + 1, 2, 3);
+    ctx.restore();
+    if (!b.done) {
+      ctx.fillStyle = '#1a1423';
+      ctx.fillRect(X + 2, Y - 4, 14, 3);
+      ctx.fillStyle = '#ffd25e';
+      ctx.fillRect(X + 3, Y - 3, Math.round(12 * p), 1);
     }
   }
 
@@ -618,6 +781,14 @@ export class MapView {
       ctx.fillRect(X + 2, Y - 4, bw + 2, 3);
       ctx.fillStyle = '#ffd25e';
       ctx.fillRect(X + 3, Y - 3, Math.round(bw * p), 1);
+      return;
+    }
+    if (b.spent) {
+      // Worked out: the pit is abandoned and weathering.
+      ctx.globalAlpha = 0.55;
+      this.drawBuildingSprite(state, b.type, b.x, b.y, 1);
+      ctx.globalAlpha = 1;
+      ctx.drawImage(sprite('rock'), X + 1, Y + 10);
       return;
     }
     this.drawBuildingSprite(state, b.type, b.x, b.y, 1);

@@ -221,6 +221,12 @@ function tryGenerate(seed: number, attempt: number, force = false): WorldMap | n
   const sx = start % W;
   const sy = Math.floor(start / W);
   terrain[start] = T.Grass;
+  // The founders clear a green around their fire.
+  for (let dy = -1; dy <= 1; dy++)
+    for (let dx = -1; dx <= 1; dx++) {
+      const i = idx(sx + dx, sy + dy);
+      if (terrain[i] === T.Forest || terrain[i] === T.Dense) terrain[i] = T.Grass;
+    }
 
   const land = (i: number) => BUILDABLE.has(terrain[i]);
   const placeFeature = (f: F, count: number, ok: (i: number) => boolean, minD: number, maxD = 999) => {

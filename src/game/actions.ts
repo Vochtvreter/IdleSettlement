@@ -1,6 +1,7 @@
 import { BUILDING_DEFS, ERAS, JOB_DEFS, TECH_DEFS } from './data';
 import { buildingCount, canAfford, canPlace, derived, invalidate, pay, refund } from './derived';
 import { resolveChoice } from './events';
+import { clearTile, layRoad, roadPath } from './land';
 import { idx } from './map';
 import { checkObjectives } from './objectives';
 import { eraOf, hasTech } from './state';
@@ -27,8 +28,13 @@ export function placeBuilding(state: GameState, type: BuildingId, tile: number, 
   if (!avail.ok) return avail;
   const check = canPlace(state, type, tile);
   if (!check.ok) return check;
+  // Every building is joined to the hearth by a road; somewhere a road cannot reach cannot be built.
+  const road = roadPath(state, tile);
+  if (!road) return { ok: false, reason: 'No road can reach this spot' };
   pay(state, BUILDING_DEFS[type].cost);
+  clearTile(state, tile);
   state.buildings.push({ id: state.nextBuildingId++, type, x, y, progress: 0, done: false });
+  layRoad(state, road);
   invalidate(state);
   if (state.jobTargets.builder === 0 && derived(state).sites.length === 1) {
     // Helpful nudge: ensure at least one builder is wanted once construction begins.
