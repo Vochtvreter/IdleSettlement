@@ -6,7 +6,7 @@ import {
   JOB_DEFS,
   PARTY_SIZE,
 } from './data';
-import { census, derived, invalidate, jobUnlocked, type SlotGroup } from './derived';
+import { census, derived, invalidate, jobUnlocked, recount, type SlotGroup } from './derived';
 import { worksQueue } from './actions';
 import { centerOf, drawFrom, fellLeft, growLand, landFrac, landMax, prepareSite } from './land';
 import { inParty, loseTraveller, paveRoutes, realmDay, setRevealHook, townWithRoom, tradeKnowledge, tradeMorale } from './realm';
@@ -435,12 +435,16 @@ export function tick(state: GameState, ctx: TickContext) {
     // Gatherers: the open land feeds a few; berry thickets and fishing waters feed more until picked out.
     const n = jobs.gatherer;
     const fo = forage(state);
+    const per = out('gatherer', 1) * 1.8;
     const onBase = Math.min(n, fo.base);
     let onFeat = Math.min(n - onBase, fo.feat);
     const over = n - onBase - onFeat;
-    if (onFeat > 0) onFeat = drawFrom(state, 'life', fo.tiles, onFeat * 0.8) / 0.8;
-    const eff = onBase + onFeat + Math.max(0, over) * 0.4;
-    produce('food', 'Gatherers', out('gatherer', 1) * eff * 1.8);
+    // Thickets and fishing waters are only picked for what the stores can still take, so they are
+    // not stripped bare for food that would spoil.
+    const open = (onBase + Math.max(0, over) * 0.4) * per;
+    const pick = per > 0 ? Math.min(onFeat, Math.max(0, room('food', foodNeed) - open) / per) : 0;
+    onFeat = pick > 0 ? drawFrom(state, 'life', fo.tiles, pick * 0.8) / 0.8 : 0;
+    produce('food', 'Gatherers', per * (onBase + onFeat + Math.max(0, over) * 0.4));
   }
   produce('food', 'Idle foragers', pop.idle * 0.45 * (SEASON_MULT.gatherer![season]) * prodMult);
   produce('food', 'Farmers', out('farmer', jobs.farmer) * 4.2);
@@ -596,8 +600,18 @@ export function tick(state: GameState, ctx: TickContext) {
     const foodF = state.hunger > 0.05 ? 0.1 : state.res.food < state.settlers.length * 3 ? 0.5 : 1;
     const moraleF = Math.max(0.25, Math.min(1.4, state.morale / 55));
     const rate = (0.3 / DAYS_PER_YEAR) * foodF * moraleF * modMult(state, 'births') * fxMul(state, 'births');
-    const mothers = state.settlers.filter((s) => s.f && s.town && ageOf(state, s) >= 16 && ageOf(state, s) < 42);
+    // A child needs a father as well as a mother at home in the settlement.
+    const away = inParty(state);
+    const mothers: Settler[] = [];
+    const fathers = new Set<number>();
+    for (const s of state.settlers) {
+      if (!s.town || away.has(s.id)) continue;
+      const age = ageOf(state, s);
+      if (s.f && age >= 16 && age < 42) mothers.push(s);
+      else if (!s.f && age >= 16 && age < 60) fathers.add(s.town);
+    }
     for (const mother of mothers) {
+      if (!fathers.has(mother.town)) continue;
       const room = free.get(mother.town) ?? 0;
       const housingF = room <= 0 ? 0 : Math.min(1, room / 3);
       if (!rng.chance(rate * housingF)) continue;
@@ -609,6 +623,7 @@ export function tick(state: GameState, ctx: TickContext) {
       ctx.fx.push({ kind: 'birth', settler: child.id });
       log(state, `${child.name} was born to ${mother.name}.`, 'birth');
     }
+    recount(state);
   }
 
   // --- population: deaths
@@ -672,6 +687,7 @@ export function killSettler(state: GameState, ctx: TickContext, s: Settler, caus
   if (i < 0) return;
   state.settlers.splice(i, 1);
   loseTraveller(state, s.id);
+  recount(state);
   state.stats.deaths++;
   ctx.fx.push({ kind: 'death', settler: s.id });
   const age = Math.floor(ageOf(state, s));
@@ -687,6 +703,7 @@ export function addSettlers(state: GameState, ctx: TickContext, rng: Rng, n: num
     ctx.fx.push({ kind: 'birth', settler: s.id });
   }
   state.stats.immigrants += n;
+  recount(state);
   ctx.fx.push({ kind: 'arrive', count: n });
 }
 

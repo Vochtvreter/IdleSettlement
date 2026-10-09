@@ -202,11 +202,7 @@ interface Memo {
   /** Adults in each settlement after the capital, as staffed for `d`. */
   staffed: number[];
   d: Derived | null;
-  /** Bumped whenever `d` is worked out afresh. */
-  gen: number;
 }
-
-let generation = 0;
 
 const memo = new WeakMap<GameState, Memo>();
 
@@ -270,7 +266,6 @@ export function derived(state: GameState): Derived {
       land: null,
       staffed: [],
       d: null,
-      gen: 0,
     };
     memo.set(state, m);
   }
@@ -282,15 +277,8 @@ export function derived(state: GameState): Derived {
   if (!m.d || !sameStaff(m, state)) {
     m.staffed = staffedNow(state);
     m.d = staff(state, m.land);
-    m.gen = ++generation;
   }
   return m.d;
-}
-
-/** A number that changes whenever `derived` is worked out afresh: a cheap way to key what depends on it. */
-export function derivedGen(state: GameState): number {
-  derived(state);
-  return memo.get(state)!.gen;
 }
 
 /** Forget what was worked out (the flood fills, keyed by exactly what they depend on, are kept). */
@@ -744,12 +732,20 @@ export function buildingMult(state: GameState, b: { type: BuildingId; x: number;
 
 export type PlaceCheck = { ok: true; mult: number } | { ok: false; reason: string };
 
+export interface PlaceOpts {
+  /**
+   * It replaces a building that stood on exactly these tiles: the ground was built on already, so
+   * it cannot close off a way that was open.
+   */
+  inPlace?: boolean;
+}
+
 /**
  * Whether a building can go here (tile = top-left of its footprint): explored land in the territory,
  * not water, a peak, sacred ground, a road or another building, and reachable on foot. Standing trees and
  * rock are fine: the site is cleared and levelled before building starts.
  */
-export function canPlace(state: GameState, type: BuildingId, tile: number, d: Derived = derived(state)): PlaceCheck {
+export function canPlace(state: GameState, type: BuildingId, tile: number, d: Derived = derived(state), opts: PlaceOpts = {}): PlaceCheck {
   const map = getMap(state.seed);
   const def = BUILDING_DEFS[type];
   const x = tx(tile);
@@ -809,7 +805,7 @@ export function canPlace(state: GameState, type: BuildingId, tile: number, d: De
   }
   if (!reached) return { ok: false, reason: 'Nobody can reach it' };
   if (!access) return { ok: false, reason: 'Boxed in: no road can reach it' };
-  if (cutsThrough(state, d, x, y, w, h)) return { ok: false, reason: 'It would block the way through' };
+  if (!opts.inPlace && cutsThrough(state, d, x, y, w, h)) return { ok: false, reason: 'It would block the way through' };
   const steepNear = countRing(state, type, x, y, (tt) => tt === T.Mountain || tt === T.Peak) > 0 || tiles.some((i) => map.terrain[i] === T.Mountain);
   const hillsAt = tiles.some((i) => map.terrain[i] === T.Hills);
   switch (def.rule) {

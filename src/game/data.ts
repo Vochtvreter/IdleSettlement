@@ -407,8 +407,8 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
     name: 'The Sunspire',
     desc: 'A towering beacon of stone and bronze, the legacy of your people for all ages. It consumes vast materials as it rises. Completing it wins the game.',
     cost: { wood: 150, stone: 200 },
-    materials: { wood: 10000, stone: 20000, ore: 4000, tools: 2500, knowledge: 8000 },
-    work: 30000,
+    materials: { wood: 20000, stone: 40000, ore: 8000, tools: 5000, knowledge: 16000 },
+    work: 60000,
     tech: 'architecture',
     rule: 'land',
     territory: 6,
@@ -498,7 +498,7 @@ export const TECH_DEFS: Record<TechId, TechDef> = {
   faith: { name: 'Faith', era: 3, cost: { knowledge: 3360 }, desc: 'Unlocks Temples. Morale +5.' },
   era_wonders: { name: 'Golden Age', era: 3, cost: { knowledge: 8400, tools: 280 }, requires: ['iron', 'mathematics'], minPop: 900, minTowns: 14, minTier: 4, advancesTo: 4, desc: 'A flourishing of art and ambition. Enter the Age of Wonders.' },
 
-  architecture: { name: 'Architecture', era: 4, cost: { knowledge: 60000 }, minTowns: 18, desc: 'The knowledge to raise the Sunspire, a wonder to outlast the ages.' },
+  architecture: { name: 'Architecture', era: 4, cost: { knowledge: 150000 }, minTowns: 18, desc: 'The knowledge to raise the Sunspire, a wonder to outlast the ages.' },
 };
 
 export const TECH_ORDER = Object.keys(TECH_DEFS) as TechId[];

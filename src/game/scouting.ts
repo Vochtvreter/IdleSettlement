@@ -87,6 +87,9 @@ function unknownCounter(state: GameState, wx0: number, wy0: number, wx1: number,
   };
 }
 
+/** Unknown land (in tiles' worth) a trip must show the scouts to be worth making. */
+const MIN_GAIN = 4;
+
 export interface TripPlan {
   /** Out and back again. */
   path: number[];
@@ -127,7 +130,8 @@ export function planTrip(state: GameState, town: number): TripPlan | null {
       if (closed[i]) continue;
       closed[i] = 1;
       if (dist[i] > budget) break;
-      if (i !== start) {
+      // Somewhere worth the trip: with no land marked for them, only places that show them enough unknown land.
+      if (i !== start && (mark !== null || gain[i] >= MIN_GAIN)) {
         let sc: number;
         if (mark !== null) sc = -Math.hypot(tx(i) - tx(mark), ty(i) - ty(mark)) * 3 + gain[i] * 0.1;
         else {
@@ -159,8 +163,8 @@ export function planTrip(state: GameState, town: number): TripPlan | null {
     }
     if (best < 0) return null;
     // The marked land is out of reach on foot.
-    if (mark !== null && gain[best] < 4 && Math.hypot(tx(best) - tx(mark), ty(best) - ty(mark)) > rb + 2) return 'unreachable';
-    if (gain[best] < 4) return null;
+    if (mark !== null && gain[best] < MIN_GAIN && Math.hypot(tx(best) - tx(mark), ty(best) - ty(mark)) > rb + 2) return 'unreachable';
+    if (gain[best] < MIN_GAIN) return null;
     const out: number[] = [];
     for (let k = best; k >= 0; k = prev[k]) out.push(k);
     out.reverse();
@@ -190,13 +194,14 @@ function scoutsOf(state: GameState, town: number, away: Set<number>) {
 
 /**
  * Settlements whose scouts found nothing left in reach, and under what conditions: the search is only
- * repeated once the known land, the trips, the roads or the marked land change. (Not saved: it only
- * skips searches that would come to nothing, so a reloaded game plays out the same.)
+ * repeated once the trips, their craft, the ways out (roads, trails, bridges, settlements) or the marked
+ * land change. Exploring elsewhere cannot help, as it only ever makes less land unknown. (Not saved: it
+ * only skips searches that would come to nothing, so a reloaded game plays out the same.)
  */
 const nothingInReach = new WeakMap<GameState, Map<number, string>>();
 
 function reachKey(state: GameState) {
-  return `${state.stats.tilesExplored}:${provisions(state)}:${scoutcraft(state)}:${state.landEpoch}:${state.exploreTarget}`;
+  return `${provisions(state)}:${scoutcraft(state)}:${state.roads.length}:${state.trails.length}:${state.buildings.length}:${state.nextBuildingId}:${state.towns.length}:${state.exploreTarget}`;
 }
 
 /** Scouts who are home and rested set out together, unless it is winter or there is nothing left in reach. */

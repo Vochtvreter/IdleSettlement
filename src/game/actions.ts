@@ -1,5 +1,5 @@
 import { BUILDING_DEFS, ERAS, JOB_DEFS, TECH_DEFS, TIERS } from './data';
-import { buildingCount, canAfford, canPlace, derived, invalidate, pay, refund } from './derived';
+import { buildingCount, canAfford, canPlace, derived, invalidate, pay, refund, type PlaceOpts } from './derived';
 import { resolveChoice } from './events';
 import { footprint, layRoad, prepNeeded, roadPath } from './land';
 import { idx } from './map';
@@ -24,11 +24,11 @@ export function buildingAvailability(state: GameState, type: BuildingId): Action
   return { ok: true };
 }
 
-export function placeBuilding(state: GameState, type: BuildingId, tile: number, x: number, y: number): ActionResult {
+export function placeBuilding(state: GameState, type: BuildingId, tile: number, x: number, y: number, opts: PlaceOpts = {}): ActionResult {
   const avail = buildingAvailability(state, type);
   if (!avail.ok) return avail;
   const d = derived(state);
-  const check = canPlace(state, type, tile, d);
+  const check = canPlace(state, type, tile, d, opts);
   if (!check.ok) return check;
   // Every building is joined to a hearth by a road; somewhere a road cannot reach cannot be built.
   const tiles = footprint(type, x, y)!;

@@ -23,7 +23,7 @@ import {
   TRAFFIC_ROUTE,
   TRAFFIC_TRAIL,
 } from './data';
-import { census, canAfford, derived, derivedGen, invalidate, pay, recount, SPECIALTY_NAMES, type Derived } from './derived';
+import { census, canAfford, derived, invalidate, pay, recount, SPECIALTY_NAMES, type Derived } from './derived';
 import { choiceOf, fxMul } from './decisions';
 import { clearTile, Heap, hearthOf, landMax, layRoad, layTrail, tilesOf, townById } from './land';
 import { getMap, idx, inBounds, isSea, isWater, N4, N8, tx, ty } from './map';
@@ -31,7 +31,7 @@ import { placeName } from './names';
 import { Rng } from './rng';
 import { withSearch } from './scratch';
 import { ageOf, eraOf, hasTech, isAdult } from './state';
-import type { BuildingId, Cost, Expedition, FxEvent, GameState, Rates, ResourceId, Settlement, TradeRoute } from './types';
+import type { BuildingId, Cost, Expedition, FxEvent, GameState, Rates, ResourceId, Settlement, Settler, TradeRoute } from './types';
 import { Biome, F, T } from './types';
 
 export type RealmResult = { ok: true } | { ok: false; reason: string };
@@ -479,6 +479,20 @@ function ablePioneers(state: GameState, fromTown: number) {
   return able;
 }
 
+/** The youngest of those able, as many women as men (as far as there are both), so the new settlement can grow. */
+function pickParty(able: Settler[], n: number): Settler[] {
+  const women = able.filter((s) => s.f);
+  const men = able.filter((s) => !s.f);
+  const party: Settler[] = [];
+  let w = 0;
+  let m = 0;
+  while (party.length < n && (w < women.length || m < men.length)) {
+    const takeWoman = m >= men.length || (w < women.length && w <= m);
+    party.push(takeWoman ? women[w++] : men[m++]);
+  }
+  return party;
+}
+
 /** Whether a tile can still take a new hearth: free, outside every territory and far enough from other settlements. */
 export function siteFree(state: GameState, tile: number, exceptExpedition?: number) {
   const d = derived(state);
@@ -504,7 +518,7 @@ export function launchPioneers(state: GameState, _ctx: Ctx, fromTown: number, si
   const home0 = townById(state, fromTown);
   if (!home0 || site.path[0] !== idx(home0.x, home0.y)) return { ok: false, reason: 'That way starts from another settlement' };
   if (!siteFree(state, site.tile)) return { ok: false, reason: 'That land has been taken' };
-  const party = ablePioneers(state, fromTown).slice(0, pioneerCount(state));
+  const party = pickParty(ablePioneers(state, fromTown), pioneerCount(state));
   if (party.length < pioneerCount(state)) return { ok: false, reason: 'Too few young adults to make the journey' };
   pay(state, expeditionCost(state, site.sea));
   for (const s of party) {
@@ -750,12 +764,23 @@ function hasRoute(state: GameState, a: number, b: number) {
   return state.routes.some((r) => (r.a === a && r.b === b) || (r.a === b && r.b === a));
 }
 
-/** The sea lane between two settlements' harbours, or null. */
-function seaPath(state: GameState, a: number, b: number): number[] | null {
-  const map = getMap(state.seed);
-  const ha = harbourTiles(state, a);
-  const hb = harbourTiles(state, b);
+/** Sea lanes already charted, by the harbours at either end (the sea itself never changes). */
+const laneMemo = new Map<string, number[] | null>();
+
+/** The sea lane between two settlements' harbours, or null. (Shared: do not change the path.) */
+function seaPath(state: GameState, ha: Set<number>, hb: Set<number>): number[] | null {
   if (!ha.size || !hb.size) return null;
+  const key = `${state.seed}:${[...ha].join(',')}|${[...hb].join(',')}`;
+  const known = laneMemo.get(key);
+  if (known !== undefined) return known;
+  if (laneMemo.size > 500) laneMemo.clear();
+  const lane = chartLane(state, ha, hb);
+  laneMemo.set(key, lane);
+  return lane;
+}
+
+function chartLane(state: GameState, ha: Set<number>, hb: Set<number>): number[] | null {
+  const map = getMap(state.seed);
   const goal = new Set<number>();
   const shore = (set: Set<number>, f: (j: number) => void) => {
     for (const h of set)
@@ -801,12 +826,19 @@ function seaPath(state: GameState, a: number, b: number): number[] | null {
 /** Every pair of settlements a sea trade route could join, and whether it can be opened now. (Land routes grow by themselves: see `growTraffic`.) */
 export function routeOptions(state: GameState): RouteOption[] {
   const out: RouteOption[] = [];
+  const ports = new Map<number, Set<number>>();
+  for (const b of state.buildings) {
+    if (b.type !== 'harbour' || !b.done || b.town === undefined) continue;
+    if (!ports.has(b.town)) ports.set(b.town, new Set());
+    for (const i of tilesOf(b)) ports.get(b.town)!.add(i);
+  }
+  const none = new Set<number>();
   for (let i = 0; i < state.towns.length; i++)
     for (let j = i + 1; j < state.towns.length; j++) {
       const a = state.towns[i];
       const b = state.towns[j];
       if (hasRoute(state, a.id, b.id)) continue;
-      const path = seaPath(state, a.id, b.id);
+      const path = seaPath(state, ports.get(a.id) ?? none, ports.get(b.id) ?? none);
       const cost = GALLEY_COST;
       let reason: string | undefined;
       if (!path) reason = 'Sea routes need a harbour at both ends, on the same sea';
@@ -823,7 +855,7 @@ export function openRoute(state: GameState, ctx: Ctx, a: number, b: number): Rea
   if (!opt) return { ok: false, reason: 'No route possible' };
   if (!opt.ok) return { ok: false, reason: opt.reason ?? 'Not possible' };
   pay(state, opt.cost);
-  const r: TradeRoute = { id: state.nextRouteId++, a: opt.a, b: opt.b, kind: opt.kind, path: opt.path, opened: state.day, paved: 0 };
+  const r: TradeRoute = { id: state.nextRouteId++, a: opt.a, b: opt.b, kind: opt.kind, path: opt.path.slice(), opened: state.day, paved: 0 };
   state.routes.push(r);
   invalidate(state);
   ctx.fx.push({ kind: 'route', route: r.id });
@@ -1073,14 +1105,6 @@ export function townCap(state: GameState) {
   return TOWN_CAP[Math.min(eraOf(state), TOWN_CAP.length - 1)] + (choiceOf(state, 'expansion') === 'expand' ? 4 : 0);
 }
 
-/**
- * Settlements whose pioneers found nowhere worth going, and when: they only look again once the known
- * land or the settlements change. (Not saved: it only skips searches that would come to nothing, so a
- * reloaded game plays out the same. No pioneers are on the road while it is consulted, so none have
- * claimed land.)
- */
-const noSites = new WeakMap<GameState, Map<number, string>>();
-
 /** The council's work beyond the capital: pioneers, voyages and trade routes. */
 function councilRealm(state: GameState, ctx: Ctx) {
   if (!state.council.build || state.day % 5 !== 0) return;
@@ -1089,24 +1113,13 @@ function councilRealm(state: GameState, ctx: Ctx) {
   // Pioneers, when the realm is big enough to spare them.
   const cap = townCap(state);
   if (policy !== 'consolidate' && state.towns.length < cap && pop >= (policy === 'expand' ? 18 : 24) && state.day % 10 === 0 && state.hunger < 0.02 && state.res.food > 80 + pop * 2) {
-    // From the biggest settlements, and from any with a harbour to cross the sea from.
+    // From the biggest settlements and from any with a harbour to cross the sea from, taking turns: the
+    // land within reach of one may be all settled while another looks out over open country or the sea.
     const c = census(state);
     const byPeople = [...state.towns].sort((a, b) => (c.adults.get(b.id) ?? 0) - (c.adults.get(a.id) ?? 0) || a.id - b.id);
     const ports = new Set(state.buildings.filter((b) => b.type === 'harbour' && b.done).map((b) => b.town));
-    const from = byPeople.filter((t, k) => k < 3 || ports.has(t.id));
-    let memo = noSites.get(state);
-    if (!memo) noSites.set(state, (memo = new Map()));
-    const key = `${derivedGen(state)}:${state.stats.tilesExplored}`;
-    for (const t of from) {
-      if (!pioneerStatus(state, t.id).ok || memo.get(t.id) === key) continue;
-      const sites = findSites(state, t.id).filter((s) => s.value >= 20);
-      if (!sites.length) {
-        memo.set(t.id, key);
-        continue;
-      }
-      const site = sites.find((s) => pioneerStatus(state, t.id, s.sea).ok);
-      if (site && launchPioneers(state, ctx, t.id, site).ok) break;
-    }
+    const from = byPeople.filter((t, k) => (k < 3 || ports.has(t.id)) && pioneerStatus(state, t.id).ok);
+    if (from.length) autoPioneers(state, ctx, from[Math.floor(state.day / 10) % from.length].id);
   }
   // Galleys chart the seas now and then.
   if (hasTech(state, 'seafaring') && state.day % 60 === 0 && state.res.wood > 80) {

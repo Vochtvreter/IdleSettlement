@@ -6,8 +6,8 @@
 import { buildingAvailability, placeBuilding, research, setJobTarget, techStatus } from './actions';
 import { BUILDING_DEFS, MAP_H, MAP_W, TECH_DEFS, TECH_ORDER } from './data';
 import { choiceOf, nextPath, pathRequirements, tweak } from './decisions';
-import { canAfford, canPlace, census, derived, invalidate, SPECIALTY_NAMES, type Derived, type Specialty } from './derived';
-import { blocked, catchmentAt, centerOf, dryLand, hearthOf, layerSum, prepNeeded, ringOffsets, sizeOf, tilesOf } from './land';
+import { canAfford, canPlace, census, derived, invalidate, SPECIALTY_NAMES, type Derived, type PlaceOpts, type Specialty } from './derived';
+import { blocked, catchmentAt, centerOf, dryLand, hearthOf, isStreet, layerSum, prepNeeded, ringOffsets, sizeOf, tilesOf } from './land';
 import { getMap, idx, inBounds, N4, N8, tx, ty } from './map';
 import { townCalling, unpaved } from './realm';
 import { withSearch } from './scratch';
@@ -438,6 +438,30 @@ export function councilWish(state: GameState): Wish | null {
     if (bestTile(state, t, town) === null) return null;
     return { type: t, waiting: !canAfford(state, BUILDING_DEFS[t].cost), town };
   };
+  // A wish that has to wait for materials holds back only what would spend them. Anything that can be
+  // paid for without them goes ahead, above all the quarries, camps and mines that bring them in:
+  // otherwise a town short of stone waits for a stone house for ever.
+  let pending: Wish | null = null;
+  let lacking: ResourceId[] = [];
+  /** A wish that may wait for materials: the first such becomes the one saved up for. */
+  const take = (w: Wish | null): Wish | null => {
+    if (!w) return null;
+    if (w.waiting) {
+      if (!pending) {
+        pending = w;
+        const cost = BUILDING_DEFS[w.type].cost;
+        lacking = (Object.keys(cost) as ResourceId[]).filter((r) => state.res[r] < (cost[r] ?? 0));
+      }
+      return null;
+    }
+    return ready(w);
+  };
+  /** A wish that only goes ahead if it can be paid for now, without what is being saved up. */
+  const ready = (w: Wish | null): Wish | null => {
+    if (!w || w.waiting) return null;
+    if (pending && lacking.some((r) => (BUILDING_DEFS[w.type].cost[r] ?? 0) > 0)) return null;
+    return w;
+  };
 
   // 1. Homes, so families can grow, in the settlement that needs them most.
   const planned = d.sites.reduce((s, b) => s + (BUILDING_DEFS[b.type].housing ?? 0), 0);
@@ -446,7 +470,7 @@ export function councilWish(state: GameState): Wish | null {
   if (ht && (d.housing + planned - pop < headroom || ht.need >= 2)) {
     const town = state.towns.length > 1 ? ht.town : undefined;
     const tier = state.towns.find((t) => t.id === ht.town)?.tier ?? 0;
-    const w = (tier >= 2 && hasTech(state, 'masonry') && wish('manor', town)) || (hasTech(state, 'masonry') && wish('house', town)) || wish('hut', town);
+    const w = take((tier >= 2 && hasTech(state, 'masonry') && wish('manor', town)) || (hasTech(state, 'masonry') && wish('house', town)) || wish('hut', town));
     if (w) return w;
   }
   // 2. The great work: in the capital, or in the greatest city when the capital has no room left for it.
@@ -454,26 +478,26 @@ export function councilWish(state: GameState): Wish | null {
     const c = census(state);
     const cities = state.towns.filter((t, k) => k > 0 && t.tier >= 3).sort((a, b) => (c.residents.get(b.id) ?? 0) - (c.residents.get(a.id) ?? 0) || a.id - b.id);
     for (const t of [state.towns[0], ...cities]) {
-      const w = wish('monument', t.id);
+      const w = take(wish('monument', t.id));
       if (w) return w;
     }
   }
   // 3. Storage pressure.
   const full = (r: ResourceId) => state.res[r] >= d.caps[r] * 0.95;
   if ((full('wood') || full('stone') || full('ore') || full('tools')) && count(state, 'storehouse') < 3 + eraOf(state) * 2) {
-    const w = wish('storehouse');
-    if (w && !w.waiting) return w;
+    const w = ready(wish('storehouse'));
+    if (w) return w;
   }
   if (full('food') && hasTech(state, 'pottery') && seasonIndex(state.day) < 3 && count(state, 'granary') < 2 + eraOf(state) * 2) {
-    const w = wish('granary');
-    if (w && !w.waiting) return w;
+    const w = ready(wish('granary'));
+    if (w) return w;
   }
   // 4. Feed people with farms instead of foragers, while the stores are not already full. (Spare hands
   // forage too, but more fields would only grow food nobody can store.)
   if (hasTech(state, 'agriculture') && state.res.food < d.caps.food * 0.85) {
     const foragers = state.jobTargets.gatherer ?? 0;
     if (foragers > 4) {
-      const w = wish('farm');
+      const w = take(wish('farm'));
       if (w) return w;
     }
   }
@@ -482,12 +506,12 @@ export function councilWish(state: GameState): Wish | null {
     const tools = toolNeed(state, d);
     if (tools.short) {
       if (tools.oreShort && count(state, 'mine') < Math.max(2, Math.ceil(count(state, 'smithy') * 1.5))) {
-        const w = wish('mine');
-        if (w && !w.waiting) return w;
+        const w = ready(wish('mine'));
+        if (w) return w;
       }
       if (count(state, 'smithy') < tools.smithies) {
-        const w = wish('smithy');
-        if (w && !w.waiting) return w;
+        const w = ready(wish('smithy'));
+        if (w) return w;
       }
     }
   }
@@ -498,28 +522,28 @@ export function councilWish(state: GameState): Wish | null {
     if (!own || own.buildings >= 6) continue;
     for (const type of townCalling(state, t).slice(0, 2)) {
       if ((own.counts[type] ?? 0) + d.sites.filter((b) => b.town === t.id && b.type === type).length >= (own.buildings < 3 ? 1 : 2)) continue;
-      const w = wish(type, t.id);
-      if (w && !w.waiting) return w;
+      const w = ready(wish(type, t.id));
+      if (w) return w;
     }
   }
   // A harbour, once galleys can be built, in the settlement best placed for the sea.
   if (hasTech(state, 'seafaring') && count(state, 'harbour') < Math.min(3, 1 + Math.floor(state.towns.length / 2))) {
-    const w = wish('harbour');
-    if (w && !w.waiting) return w;
+    const w = ready(wish('harbour'));
+    if (w) return w;
   }
   // 5b. Rivers in the way of good land.
   if (pop >= 10 && state.res.wood >= (BUILDING_DEFS.bridge.cost.wood ?? 0) + 10) {
-    const w = wish('bridge');
-    if (w && !w.waiting) return w;
+    const w = ready(wish('bridge'));
+    if (w) return w;
   }
   // 6. Woods felled bare or herds hunted thin: open a camp somewhere richer.
   if (yieldEff(state, 'woodcutter') < 0.6 && state.res.wood < d.caps.wood * 0.5 && count(state, 'lumber') < 6) {
     const w = wish('lumber');
-    if (w && freshSite(state, 'lumber')) return w;
+    if (w && freshSite(state, 'lumber') && take(w)) return w;
   }
   if (yieldEff(state, 'hunter') < 0.6 && count(state, 'lodge') < 4) {
-    const w = wish('lodge');
-    if (w && !w.waiting && freshSite(state, 'lodge')) return w;
+    const w = ready(wish('lodge'));
+    if (w && freshSite(state, 'lodge')) return w;
   }
   // 7. The focus plan.
   for (const [t, n] of PLANS[focusOf(state)]) {
@@ -528,7 +552,7 @@ export function councilWish(state: GameState): Wish | null {
     if (!w) continue;
     // A second camp or lodge only where the land is not already being worked.
     if ((t === 'lumber' || t === 'lodge') && count(state, t) >= 1 && !freshSite(state, t)) continue;
-    return w;
+    if (take(w)) return w;
   }
   // 7b. Hands to spare, foraging land that cannot feed them: give them work where the realm runs short,
   // a quarry when stone is low, a camp when wood is, a mine or a forge. A realm grows its trades with its people.
@@ -544,16 +568,16 @@ export function councilWish(state: GameState): Wish | null {
     for (const [t, f] of needs) {
       if (f > 0.75) break;
       if (t === 'lumber' && !freshSite(state, 'lumber')) continue;
-      const w = wish(t);
-      if (w && !w.waiting) return w;
+      const w = ready(wish(t));
+      if (w) return w;
     }
   }
   // 8. Late game: keep adding storage so the Sunspire's appetite can be met.
   if (hasTech(state, 'architecture') && count(state, 'storehouse') < 8 + eraOf(state) * 2) {
-    const w = wish('storehouse');
+    const w = take(wish('storehouse'));
     if (w) return w;
   }
-  return null;
+  return pending;
 }
 
 function councilBuild(state: GameState) {
@@ -604,7 +628,7 @@ function blockFits(state: GameState, d: Derived, square: number[]) {
     const f = map.feature[i];
     if (t === T.Water || t === T.Deep || t === T.River || t === T.Peak || t === T.Mountain) return false;
     if (f === F.Ruins || f === F.Grove || f === F.Ore || (f === F.Berries && state.land.life[i] > 0)) return false;
-    if (!d.reach[i]) return false;
+    if (!d.reach[i] || isStreet(state, i)) return false;
   }
   return true;
 }
@@ -617,10 +641,10 @@ function putBack(state: GameState, gone: Building[]) {
 }
 
 /** Pull these down and raise a new building of a type in their place, or leave everything as it was. */
-function rebuild(state: GameState, gone: Building[], type: BuildingId, x: number, y: number) {
+function rebuild(state: GameState, gone: Building[], type: BuildingId, x: number, y: number, opts: PlaceOpts = {}) {
   const before = { ...state.res };
   pullDown(state, gone);
-  if (placeBuilding(state, type, idx(x, y), x, y).ok) return true;
+  if (placeBuilding(state, type, idx(x, y), x, y, opts).ok) return true;
   state.res = before;
   putBack(state, gone);
   return false;
@@ -650,10 +674,10 @@ function councilRenew(state: GameState) {
     const free = (d.towns.get(t.id)?.housing ?? 0) - (c.residents.get(t.id) ?? 0);
     const near = (b: Building) => Math.hypot(b.x - t.x, b.y - t.y);
     const homes = state.buildings.filter((b) => b.done && b.town === t.id && HOMELY.has(b.type)).sort((a, b) => near(a) - near(b) || a.id - b.id);
-    // Huts near the hearth become stone houses.
-    const hut = homes.find((b) => b.type === 'hut' && near(b) <= 4 + t.tier * 2);
-    if (hut && free >= (BUILDING_DEFS.hut.housing ?? 0) && state.res.stone >= (BUILDING_DEFS.house.cost.stone ?? 0) + 20) {
-      if (rebuild(state, [hut], 'house', hut.x, hut.y)) {
+    // Huts near the hearth become stone houses, on the same ground.
+    if (free >= (BUILDING_DEFS.hut.housing ?? 0) && state.res.stone >= (BUILDING_DEFS.house.cost.stone ?? 0) + 20) {
+      const huts = homes.filter((b) => b.type === 'hut' && near(b) <= 4 + t.tier * 2).slice(0, 3);
+      if (huts.some((hut) => rebuild(state, [hut], 'house', hut.x, hut.y, { inPlace: true }))) {
         note(state, `In ${t.name}, an old hut near the hearth is pulled down to make way for a stone house.`);
         continue;
       }
@@ -708,13 +732,16 @@ const FOCUS_SPLIT: Record<Focus, Partial<Record<JobId, number>>> = {
   explore: { scholar: 0.35, quarrier: 0.2, woodcutter: 0.15, miner: 0.15, smith: 0.15 },
 };
 
-/** Average daily food from one more worker of a job, given current bonuses. */
-/** Food from one more worker of a job: hunters past what the herds can bear catch only small game, gatherers past what the land can feed find little. */
+/**
+ * Food from one more worker of a job, given current bonuses: what that worker adds (the best fields
+ * and lodges are taken first, so the next one goes to a poorer one). Hunters past what the herds can
+ * bear catch only small game, gatherers past what the land can feed find little.
+ */
 function foodPer(state: GameState, j: JobId, n: number, forageCap: number) {
-  const avg = (jobOutput(state, j, Math.max(1, n + 1), -1) / Math.max(1, n + 1)) * baseRate(j);
-  if (j === 'hunter') return avg * (yieldEff(state, j) >= 0.97 ? 1 : 0.4);
-  if (j === 'gatherer') return avg * (n + 1 > forageCap ? 0.4 : 1);
-  return avg;
+  const more = (jobOutput(state, j, n + 1, -1) - jobOutput(state, j, n, -1)) * baseRate(j);
+  if (j === 'hunter') return more * (yieldEff(state, j) >= 0.97 ? 1 : 0.4);
+  if (j === 'gatherer') return more * (n + 1 > forageCap ? 0.4 : 1);
+  return more;
 }
 
 function councilJobs(state: GameState) {
