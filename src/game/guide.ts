@@ -242,6 +242,14 @@ export const GUIDE: GuideStep[] = [
     tab: 'realm',
   },
   {
+    id: 'renew',
+    title: 'Growing up',
+    text: 'Settlements rebuild themselves as they grow. Worked-out quarries and mines are cleared away, old huts near the hearth make way for stone houses, and in cities rows of homes become town blocks and the fields at the heart move out. You can <b>demolish</b> any building yourself from its inspector, too.',
+    after: 'welcome',
+    when: (s) => s.techs.includes('masonry') && s.towns.some((t) => t.tier >= 2),
+    tab: 'build',
+  },
+  {
     id: 'onward',
     title: 'Onward',
     text: 'That is all you need to know. Keep reaching milestones, choose a path at each Crossroads, and in the Age of Wonders raise the <b>Sunspire</b>. The full guide is in the menu.',

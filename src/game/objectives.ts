@@ -29,7 +29,7 @@ export function objectiveProgress(s: GameState, i: number): [number, number] {
     case 9:
       return [Math.min(3, eraOf(s)), 3];
     case 10:
-      return [pop, 60];
+      return [pop, 200];
     case 11:
       return [Math.min(4, eraOf(s)), 4];
     case 12:

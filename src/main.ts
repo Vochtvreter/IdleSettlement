@@ -7,7 +7,7 @@ import { buildingAvailability, placeBuilding } from './game/actions';
 import { ERAS } from './game/data';
 import { invalidate } from './game/derived';
 import { tx, ty } from './game/map';
-import { clearSave, hasSave, loadGame, loadPrefs, offlineDays, saveGame, savePrefs, simulateOffline } from './game/save';
+import { clearSave, hasSave, loadGame, loadPrefs, offlineDays, offlineRun, saveGame, savePrefs } from './game/save';
 import { emptyRates, tick, type TickContext } from './game/sim';
 import { eraOf, newGame, year } from './game/state';
 import type { BuildingId, FxEvent, GameState, Rates } from './game/types';
@@ -28,6 +28,8 @@ class GameApp implements Game {
   speed = 1;
   paused = false;
   modalOpen = false;
+  /** Time away is being played out: the clock waits. */
+  catchingUp = false;
   mode: 'title' | 'game' = 'title';
   private acc = 0;
   private last = performance.now();
@@ -183,13 +185,39 @@ class GameApp implements Game {
     }
   }
 
+  /** Play out the time away a slice per frame, with the years shown passing, then report. */
   private catchUp(awayMs: number) {
-    if (offlineDays(awayMs) < 5) return;
-    const report = simulateOffline(this.state, awayMs);
-    this.previewRates();
-    this.save();
-    if (report) this.ui.offlineModal(report);
-    this.ui.attach(this.state);
+    if (offlineDays(awayMs) < 5 || this.catchingUp) return;
+    const state = this.state;
+    const run = offlineRun(state, awayMs);
+    if (!run) return;
+    this.catchingUp = true;
+    const veil = h('div', { class: 'catchup' }, h('div', { class: 'catchup-box' }, h('div', { class: 'catchup-title' }, 'The years pass…'), h('div', { class: 'bar' }, h('i'))));
+    document.body.append(veil);
+    const bar = veil.querySelector('i') as HTMLElement;
+    const slice = () => {
+      if (this.state !== state) {
+        veil.remove();
+        this.catchingUp = false;
+        return;
+      }
+      const t = performance.now();
+      let done = false;
+      while (!done && performance.now() - t < 30) done = run.step(5);
+      bar.style.width = `${Math.round(run.progress() * 100)}%`;
+      if (!done) {
+        requestAnimationFrame(slice);
+        return;
+      }
+      veil.remove();
+      this.catchingUp = false;
+      this.last = performance.now();
+      this.previewRates();
+      this.save();
+      this.ui.offlineModal(run.report());
+      this.ui.attach(this.state);
+    };
+    requestAnimationFrame(slice);
   }
 
   private step() {
@@ -203,7 +231,7 @@ class GameApp implements Game {
     this.last = now;
     dt = Math.min(dt, 0.1);
     if (this.mode === 'game') {
-      if (!this.paused && !this.modalOpen && !this.state.defeat) {
+      if (!this.paused && !this.modalOpen && !this.catchingUp && !this.state.defeat) {
         this.acc += dt * this.speed;
         let n = 0;
         while (this.acc >= 1 && n < 8) {
@@ -315,6 +343,6 @@ if (DEV) {
     app.changed();
   };
   window.addEventListener('keydown', (e) => {
-    if (e.key === '4') app.setSpeed(20);
+    if (e.key === '5') app.setSpeed(20);
   });
 }

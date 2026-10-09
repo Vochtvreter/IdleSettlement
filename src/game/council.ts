@@ -6,13 +6,13 @@
 import { buildingAvailability, placeBuilding, research, setJobTarget, techStatus } from './actions';
 import { BUILDING_DEFS, MAP_H, MAP_W, TECH_DEFS, TECH_ORDER } from './data';
 import { choiceOf, nextPath, pathRequirements, tweak } from './decisions';
-import { canAfford, canPlace, census, derived, SPECIALTY_NAMES, type Derived, type Specialty } from './derived';
-import { blocked, catchmentAt, centerOf, dryLand, hearthOf, layerSum, prepNeeded, ringOf, sizeOf } from './land';
+import { canAfford, canPlace, census, derived, invalidate, SPECIALTY_NAMES, type Derived, type Specialty } from './derived';
+import { blocked, catchmentAt, centerOf, dryLand, hearthOf, layerSum, prepNeeded, ringOf, sizeOf, tilesOf } from './land';
 import { getMap, idx, inBounds, N4, N8, tx, ty } from './map';
 import { townCalling, unpaved } from './realm';
 import { baseRate, foodDemand, gathererCapacity, jobOutput, pastureYield, popSummary, yieldEff, type TickContext } from './sim';
 import { eraOf, hasTech, seasonIndex } from './state';
-import type { BuildingId, Cost, GameState, JobId, ResourceId, TechId } from './types';
+import type { Building, BuildingId, Cost, GameState, JobId, ResourceId, TechId } from './types';
 import { F, JOBS, T } from './types';
 
 type Focus = 'balanced' | 'growth' | 'industry' | 'knowledge' | 'explore';
@@ -24,6 +24,7 @@ export function focusOf(state: GameState): Focus {
 export function runCouncil(state: GameState, ctx: TickContext) {
   if (state.council.research) councilResearch(state, ctx);
   if (state.council.build && state.day % 2 === 0) councilBuild(state);
+  if (state.council.build && state.day % 20 === 10) councilRenew(state);
   if (state.council.jobs) councilJobs(state);
 }
 
@@ -501,6 +502,134 @@ function councilBuild(state: GameState) {
   const t = bestTile(state, w.type, w.town);
   if (t === null) return;
   placeBuilding(state, w.type, t, tx(t), ty(t));
+}
+
+// ------------------------------------------------------------------ renewal
+
+const HOMELY: ReadonlySet<BuildingId> = new Set(['hut', 'house']);
+
+function note(state: GameState, text: string) {
+  state.log.push({ day: state.day, text, kind: 'build' });
+  if (state.log.length > 300) state.log.splice(0, state.log.length - 300);
+}
+
+/** Pull buildings down, giving back a little of what they cost. */
+function pullDown(state: GameState, gone: Building[]) {
+  const caps = derived(state).caps;
+  for (const b of gone) {
+    state.buildings.splice(state.buildings.indexOf(b), 1);
+    for (const [r, n] of Object.entries(BUILDING_DEFS[b.type].cost)) {
+      const k = r as ResourceId;
+      state.res[k] = Math.min(caps[k], state.res[k] + (n ?? 0) * 0.25);
+    }
+  }
+  invalidate(state);
+}
+
+/** Town-block plans that did not fit, until the settlement's buildings or roads change. */
+const failedBlocks = new WeakMap<GameState, { key: string; tiles: Set<number> }>();
+
+/** Whether a square of homes could plausibly become a town block, judged without pulling anything down. */
+function blockFits(state: GameState, d: Derived, square: number[]) {
+  const map = getMap(state.seed);
+  for (const i of square) {
+    if (!state.explored[i] || !d.territory[i] || (d.occupied[i] && !d.buildingAt[i])) return false;
+    const t = map.terrain[i];
+    const f = map.feature[i];
+    if (t === T.Water || t === T.Deep || t === T.River || t === T.Peak || t === T.Mountain) return false;
+    if (f === F.Ruins || f === F.Grove || f === F.Ore || (f === F.Berries && state.land.life[i] > 0)) return false;
+    if (!d.reach[i]) return false;
+  }
+  return true;
+}
+
+/** Put buildings that were pulled down for a plan that came to nothing back as they were. */
+function putBack(state: GameState, gone: Building[]) {
+  state.buildings.push(...gone);
+  state.buildings.sort((a, b) => a.id - b.id);
+  invalidate(state);
+}
+
+/** Pull these down and raise a new building of a type in their place, or leave everything as it was. */
+function rebuild(state: GameState, gone: Building[], type: BuildingId, x: number, y: number) {
+  const before = { ...state.res };
+  pullDown(state, gone);
+  if (placeBuilding(state, type, idx(x, y), x, y).ok) return true;
+  state.res = before;
+  putBack(state, gone);
+  return false;
+}
+
+/**
+ * Settlements renew themselves as they grow. Worked-out quarries and mines are torn down and their
+ * ground cleared. In towns the old huts near the hearth give way to stone houses, and in cities rows
+ * of houses are pulled down for town blocks, and the fields closest to the heart make way for homes
+ * when there is no room left for them. One change at a time in each settlement, while nobody is left
+ * without a bed.
+ */
+function councilRenew(state: GameState) {
+  // Worked-out pits.
+  const spent = state.buildings.filter((b) => b.done && b.spent);
+  if (spent.length) {
+    pullDown(state, spent.slice(0, 2));
+    for (const b of spent.slice(0, 2)) note(state, `The worked-out ${BUILDING_DEFS[b.type].name.toLowerCase()} at ${b.x},${b.y} is torn down and its ground cleared.`);
+  }
+  if (!hasTech(state, 'masonry')) return;
+  const c = census(state);
+  for (const t of state.towns) {
+    if (t.tier < 2) continue;
+    const d = derived(state);
+    // One rebuilding at a time in each settlement.
+    if (d.sites.some((b) => b.town === t.id && (b.type === 'house' || b.type === 'manor'))) continue;
+    const free = (d.towns.get(t.id)?.housing ?? 0) - (c.residents.get(t.id) ?? 0);
+    const near = (b: Building) => Math.hypot(b.x - t.x, b.y - t.y);
+    const homes = state.buildings.filter((b) => b.done && b.town === t.id && HOMELY.has(b.type)).sort((a, b) => near(a) - near(b) || a.id - b.id);
+    // Huts near the hearth become stone houses.
+    const hut = homes.find((b) => b.type === 'hut' && near(b) <= 4 + t.tier * 2);
+    if (hut && free >= (BUILDING_DEFS.hut.housing ?? 0) && state.res.stone >= (BUILDING_DEFS.house.cost.stone ?? 0) + 20) {
+      if (rebuild(state, [hut], 'house', hut.x, hut.y)) {
+        note(state, `In ${t.name}, an old hut near the hearth is pulled down to make way for a stone house.`);
+        continue;
+      }
+    }
+    if (t.tier < 3 || state.res.stone < (BUILDING_DEFS.manor.cost.stone ?? 0) * 1.5) continue;
+    // In cities, a block of four homes becomes a town block.
+    const fkey = `${state.nextBuildingId}:${state.roads.length}`;
+    let failed = failedBlocks.get(state);
+    if (!failed || failed.key !== fkey) failedBlocks.set(state, (failed = { key: fkey, tiles: new Set() }));
+    let done = false;
+    let tries = 0;
+    for (const h of homes.slice(0, 8)) {
+      for (const [ox, oy] of [[0, 0], [-1, 0], [0, -1], [-1, -1]]) {
+        const x = h.x + ox;
+        const y = h.y + oy;
+        if (!inBounds(x, y) || !inBounds(x + 1, y + 1) || failed.tiles.has(idx(x, y))) continue;
+        const square = [idx(x, y), idx(x + 1, y), idx(x, y + 1), idx(x + 1, y + 1)];
+        const gone = state.buildings.filter((b) => tilesOf(b).some((i) => square.includes(i)));
+        if (!gone.every((b) => b.done && HOMELY.has(b.type) && b.town === t.id)) continue;
+        const lost = gone.reduce((sum, b) => sum + (BUILDING_DEFS[b.type].housing ?? 0), 0);
+        if (gone.length < 2 || free < lost || !blockFits(state, d, square)) continue;
+        if (rebuild(state, gone, 'manor', x, y)) {
+          note(state, `In ${t.name}, a row of ${gone.length} homes is pulled down to raise a town block in their place.`);
+          done = true;
+          break;
+        }
+        failed.tiles.add(idx(x, y));
+        if (++tries >= 2) break;
+      }
+      if (done || tries >= 2) break;
+    }
+    if (done) continue;
+    // Fields at the heart of a crowded city move out to make room for homes.
+    const ht = homeTown(state);
+    if (ht?.town !== t.id || bestTile(state, 'manor', t.id) !== null || bestTile(state, 'house', t.id) !== null) continue;
+    if (state.res.food < state.settlers.length * 5) continue;
+    const field = state.buildings.filter((b) => b.done && b.town === t.id && (b.type === 'farm' || b.type === 'pasture') && near(b) <= 3 + t.tier * 2).sort((a, b) => near(a) - near(b) || a.id - b.id)[0];
+    if (field) {
+      pullDown(state, [field]);
+      note(state, `${t.name} has grown around its fields: the ${BUILDING_DEFS[field.type].name.toLowerCase()} by the hearth is given over to homes, and new fields will be broken further out.`);
+    }
+  }
 }
 
 // ------------------------------------------------------------------ work

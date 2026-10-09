@@ -35,15 +35,38 @@ export function savePrefs(p: Partial<Prefs>) {
   }
 }
 
-/** Compact the explored array into a string for storage. */
+/** Compact the explored array into a string for storage: runs of unknown and known land, in base 36. */
 function packExplored(e: number[]) {
-  let s = '';
-  for (let i = 0; i < e.length; i += 4) s += ((e[i] ? 1 : 0) | (e[i + 1] ? 2 : 0) | (e[i + 2] ? 4 : 0) | (e[i + 3] ? 8 : 0)).toString(16);
-  return s;
+  const runs: string[] = [];
+  let cur = 0;
+  let len = 0;
+  for (let i = 0; i < e.length; i++) {
+    const v = e[i] ? 1 : 0;
+    if (v === cur) len++;
+    else {
+      runs.push(len.toString(36));
+      cur = v;
+      len = 1;
+    }
+  }
+  runs.push(len.toString(36));
+  return 'r' + runs.join(',');
 }
 
 function unpackExplored(s: string) {
   const out = new Array(MAP_W * MAP_H).fill(0);
+  if (s.startsWith('r')) {
+    let at = 0;
+    let v = 0;
+    for (const run of s.slice(1).split(',')) {
+      const n = parseInt(run, 36);
+      if (v) out.fill(1, at, Math.min(out.length, at + n));
+      at += n;
+      v ^= 1;
+    }
+    return out;
+  }
+  // Older saves: four tiles to a hex digit.
   for (let i = 0; i < s.length; i++) {
     const v = parseInt(s[i], 16);
     for (let b = 0; b < 4; b++) if (i * 4 + b < out.length) out[i * 4 + b] = v & (1 << b) ? 1 : 0;
@@ -149,15 +172,26 @@ export interface OfflineReport {
   arrivals: number;
 }
 
-/** Offline progress runs at half speed, capped at 12 in-game years. */
+/** Offline progress runs at half speed, capped at 40 in-game years. */
 export const OFFLINE_RATE = 0.5;
-export const OFFLINE_MAX_DAYS = 480;
+export const OFFLINE_MAX_DAYS = 1600;
 
 export function offlineDays(awayMs: number) {
   return Math.min(OFFLINE_MAX_DAYS, Math.floor((awayMs / 1000) * OFFLINE_RATE));
 }
 
 export function simulateOffline(state: GameState, awayMs: number, maxDays = offlineDays(awayMs)): OfflineReport | null {
+  const run = offlineRun(state, awayMs, maxDays);
+  if (!run) return null;
+  while (!run.step(Infinity));
+  return run.report();
+}
+
+/**
+ * Time away, a slice at a time, so a long absence can be caught up without freezing the page:
+ * `step(n)` plays up to n more days and says whether it is done.
+ */
+export function offlineRun(state: GameState, awayMs: number, maxDays = offlineDays(awayMs)) {
   const days = maxDays;
   if (days < 5 || state.defeat) return null;
   const before = { pop: state.settlers.length, res: { ...state.res } };
@@ -166,18 +200,29 @@ export function simulateOffline(state: GameState, awayMs: number, maxDays = offl
   const i0 = state.stats.immigrants;
   const ctx: TickContext = { fx: [] as FxEvent[], rates: emptyRates(), offline: true };
   invalidate(state);
-  for (let i = 0; i < days; i++) {
-    ctx.fx.length = 0;
-    tick(state, ctx);
-    if (state.defeat || state.victory) break;
-  }
+  let done = 0;
+  let over = false;
   return {
-    awayMs,
     days,
-    before,
-    after: { pop: state.settlers.length, res: { ...state.res } },
-    births: state.stats.births - b0,
-    deaths: state.stats.deaths - d0,
-    arrivals: state.stats.immigrants - i0,
+    /** Share of the days played so far. */
+    progress: () => done / days,
+    step(n: number) {
+      for (let k = 0; k < n && !over && done < days; k++) {
+        ctx.fx.length = 0;
+        tick(state, ctx);
+        done++;
+        if (state.defeat || state.victory) over = true;
+      }
+      return over || done >= days;
+    },
+    report: (): OfflineReport => ({
+      awayMs,
+      days,
+      before,
+      after: { pop: state.settlers.length, res: { ...state.res } },
+      births: state.stats.births - b0,
+      deaths: state.stats.deaths - d0,
+      arrivals: state.stats.immigrants - i0,
+    }),
   };
 }

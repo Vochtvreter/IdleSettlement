@@ -178,7 +178,7 @@ export interface SiteProfile {
   coast: boolean;
 }
 
-const valueCache = new Map<number, Float32Array>();
+const valueCache = new Map<number, SiteValues>();
 
 /** Fresh water within a few tiles: rivers and lakes (not the salt sea). */
 function freshWaterNear(seed: number, i: number, r = 3) {
@@ -231,29 +231,41 @@ export function siteProfile(seed: number, i: number): SiteProfile {
   return p;
 }
 
+/** How good each place would be for a new settlement's hearth (0 where one cannot stand), worked out as asked for. */
+export class SiteValues {
+  private v: Float32Array;
+  constructor(private seed: number) {
+    this.v = new Float32Array(MAP_W * MAP_H).fill(-1);
+  }
+  at(i: number): number {
+    const v = this.v[i];
+    return v >= 0 ? v : (this.v[i] = siteValueAt(this.seed, i));
+  }
+}
+
+function siteValueAt(seed: number, i: number): number {
+  const map = getMap(seed);
+  const t = map.terrain[i];
+  if (t !== T.Grass && t !== T.Meadow && t !== T.Sand && t !== T.Forest) return 0;
+  if (map.feature[i]) return 0;
+  const x = tx(i);
+  const y = ty(i);
+  if (x < 3 || y < 3 || x > MAP_W - 4 || y > MAP_H - 4) return 0;
+  // Room for a green: most of the ring must be walkable land.
+  let ok = 0;
+  for (const [dx, dy] of N8) {
+    const tt = map.terrain[idx(x + dx, y + dy)];
+    if (!isWater(tt) && tt !== T.Mountain && tt !== T.Peak) ok++;
+  }
+  if (ok < 6) return 0;
+  return profileValue(siteProfile(seed, i));
+}
+
 /** How good a place is for a new settlement's hearth, from what is around it (0 where one cannot stand). */
-export function siteValues(seed: number): Float32Array {
+export function siteValues(seed: number): SiteValues {
   let v = valueCache.get(seed);
   if (v) return v;
-  const map = getMap(seed);
-  const n = MAP_W * MAP_H;
-  v = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const t = map.terrain[i];
-    if (t !== T.Grass && t !== T.Meadow && t !== T.Sand && t !== T.Forest) continue;
-    if (map.feature[i]) continue;
-    const x = tx(i);
-    const y = ty(i);
-    if (x < 3 || y < 3 || x > MAP_W - 4 || y > MAP_H - 4) continue;
-    // Room for a green: most of the ring must be walkable land.
-    let ok = 0;
-    for (const [dx, dy] of N8) {
-      const tt = map.terrain[idx(x + dx, y + dy)];
-      if (!isWater(tt) && tt !== T.Mountain && tt !== T.Peak) ok++;
-    }
-    if (ok < 6) continue;
-    v[i] = profileValue(siteProfile(seed, i));
-  }
+  v = new SiteValues(seed);
   if (valueCache.size >= 4) valueCache.delete(valueCache.keys().next().value!);
   valueCache.set(seed, v);
   return v;
@@ -367,8 +379,8 @@ export function findSites(state: GameState, fromTown: number, opts: { sea?: bool
     const di = dist[i];
     if (di > maxCost) break;
     const onSea = isWater(map.terrain[i]) && map.ocean[i];
-    if (!onSea && values[i] > 0 && state.explored[i] && !d.occupied[i] && !d.territory[i] && spacing(i) && claimed.every((c) => Math.hypot(tx(c) - tx(i), ty(c) - ty(i)) >= TOWN_SPACING)) {
-      let v = values[i];
+    if (!onSea && state.explored[i] && values.at(i) > 0 && state.explored[i] && !d.occupied[i] && !d.territory[i] && spacing(i) && claimed.every((c) => Math.hypot(tx(c) - tx(i), ty(c) - ty(i)) >= TOWN_SPACING)) {
+      let v = values.at(i);
       if (!biomesHeld.has(map.biome[i])) v += 5;
       if (map.island[i] !== map.island[start]) v += 3;
       out.push({ tile: i, path: [], cost: di, value: v, score: v - di * 0.09, sea: false });
@@ -468,13 +480,13 @@ function ablePioneers(state: GameState, fromTown: number) {
 /** Whether a tile can still take a new hearth: free, outside every territory and far enough from other settlements. */
 export function siteFree(state: GameState, tile: number, exceptExpedition?: number) {
   const d = derived(state);
-  if ((d.occupied[tile] && !d.trail[tile]) || d.territory[tile] || siteValues(state.seed)[tile] <= 0) return false;
+  if ((d.occupied[tile] && !d.trail[tile]) || d.territory[tile] || siteValues(state.seed).at(tile) <= 0) return false;
   if (!state.towns.every((t) => Math.hypot(t.x - tx(tile), t.y - ty(tile)) >= TOWN_SPACING)) return false;
   return state.expeditions.every((e) => e.id === exceptExpedition || e.kind !== 'settle' || Math.hypot(tx(e.path[e.path.length - 1]) - tx(tile), ty(e.path[e.path.length - 1]) - ty(tile)) >= TOWN_SPACING);
 }
 
 export function pioneerCount(state: GameState) {
-  return PIONEERS + (choiceOf(state, 'expansion') === 'expand' ? 2 : 0);
+  return PIONEERS + (choiceOf(state, 'expansion') === 'expand' ? 4 : 0);
 }
 
 export function expeditionCost(_state: GameState, sea: boolean): Cost {
@@ -1040,11 +1052,11 @@ export function townCalling(state: GameState, town: Settlement): BuildingId[] {
 }
 
 /** Most settlements the realm will aim for in each age, before the Expansion policy. */
-const TOWN_CAP = [1, 2, 4, 6, 8];
+const TOWN_CAP = [1, 3, 8, 16, 30];
 
 /** How many settlements the council aims for now. */
 export function townCap(state: GameState) {
-  return TOWN_CAP[Math.min(eraOf(state), TOWN_CAP.length - 1)] + (choiceOf(state, 'expansion') === 'expand' ? 2 : 0);
+  return TOWN_CAP[Math.min(eraOf(state), TOWN_CAP.length - 1)] + (choiceOf(state, 'expansion') === 'expand' ? 4 : 0);
 }
 
 /** The council's work beyond the capital: pioneers, voyages and trade routes. */

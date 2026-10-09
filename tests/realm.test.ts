@@ -299,8 +299,8 @@ describe('scouting parties', () => {
     invalidate(s);
     const values = siteValues(s.seed);
     let site = -1;
-    for (let i = 0; i < values.length; i++)
-      if (values[i] >= 26 && Math.hypot(tx(i) - home.x, ty(i) - home.y) > 22 && siteFree(s, i) && (site < 0 || values[i] > values[site])) site = i;
+    for (let i = 0; i < s.explored.length; i++)
+      if (getMap(s.seed).island[i] === getMap(s.seed).island[getMap(s.seed).start] && values.at(i) >= 26 && Math.hypot(tx(i) - home.x, ty(i) - home.y) > 22 && Math.hypot(tx(i) - home.x, ty(i) - home.y) < 50 && siteFree(s, i) && (site < 0 || values.at(i) > values.at(site))) site = i;
     expect(site).toBeGreaterThanOrEqual(0);
     s.explored.fill(1);
     invalidate(s);
@@ -317,7 +317,7 @@ describe('scouting parties', () => {
     // On prime land along their way (perhaps before they reached the site they were making for).
     const at = idx(s.towns[1].x, s.towns[1].y);
     expect(path).toContain(at);
-    expect(values[at]).toBeGreaterThanOrEqual(26);
+    expect(values.at(at)).toBeGreaterThanOrEqual(26);
     const runner = s.expeditions.find((e) => e.kind === 'scout')!;
     expect(runner.messenger).toBe(true);
     expect(runner.people.length).toBe(1);

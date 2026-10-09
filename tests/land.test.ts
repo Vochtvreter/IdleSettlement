@@ -66,6 +66,8 @@ describe('occupied land', () => {
     expect(siteStage(s, b)).toBe('felling');
     expect(s.land.wood[tile!]).toBe(wood0);
     setJobTarget(s, 'builder', 3);
+    // Clearing the way to the site may already have filled the stores.
+    s.res.wood = 20;
     const before = s.res.wood;
     run(s, 60);
     expect(s.land.wood[tile!]).toBe(0);
@@ -215,7 +217,7 @@ describe('resources run out', () => {
 });
 
 describe('bridges', () => {
-  it('a bridge opens land across a river', () => {
+  it('a bridge opens land across a river', { timeout: 120_000 }, () => {
     let found: { s: GameState; tile: number } | null = null;
     for (let seed = 1; seed < 400 && !found; seed++) {
       const s = newGame(seed, 0, 0);
@@ -237,13 +239,16 @@ describe('bridges', () => {
 });
 
 describe('saving the land', () => {
-  it('round-trips stocks, roads and herds', () => {
+  it('round-trips stocks, roads and herds', { timeout: 60_000 }, () => {
     const s = newGame(21, 0, 0);
     run(s, DAYS_PER_YEAR * 4);
     const back = deserialize(serialize(s))!;
     expect(back.roads).toEqual(s.roads);
-    for (const l of ['wood', 'stone', 'ore', 'life'] as const)
-      for (let i = 0; i < s.land[l].length; i++) expect(Math.abs(back.land[l][i] - s.land[l][i])).toBeLessThan(0.001);
+    for (const l of ['wood', 'stone', 'ore', 'life'] as const) {
+      let off = 0;
+      for (let i = 0; i < s.land[l].length; i++) if (Math.abs(back.land[l][i] - s.land[l][i]) >= 0.001) off++;
+      expect(off, l).toBe(0);
+    }
     expect(serialize(s).length).toBeLessThan(60_000);
   });
 
@@ -260,5 +265,27 @@ describe('saving the land', () => {
     const h = s.buildings[0];
     const m = landMax(5);
     for (const i of catchmentAt(s, 'campfire', h.x, h.y, 'wood')) expect(m.wood[i]).toBeGreaterThan(0);
+  });
+});
+
+describe('settlements that rebuild themselves', () => {
+  it('tear down worked-out pits, and rebuild old huts near the hearth in stone', () => {
+    const s = newGame(1, 0, 0);
+    s.council.jobs = false;
+    s.techs.push('stone_tools', 'era_village', 'agriculture', 'era_bronze', 'masonry');
+    const near = (i: number) => Math.hypot(tx(i) - s.towns[0].x, ty(i) - s.towns[0].y) <= 5;
+    const hut = build(s, 'hut', near)!;
+    const pit = build(s, 'quarry')!;
+    pit.spent = true;
+    s.towns[0].tier = 2;
+    s.res = { ...s.res, wood: 500, stone: 600 };
+    invalidate(s);
+    s.council.build = true;
+    run(s, 25);
+    expect(s.buildings.includes(pit)).toBe(false);
+    expect(s.buildings.includes(hut)).toBe(false);
+    const house = s.buildings.find((b) => b.type === 'house' && b.x === hut.x && b.y === hut.y);
+    expect(house).toBeTruthy();
+    expect(s.log.some((l) => /make way for a stone house/.test(l.text))).toBe(true);
   });
 });

@@ -1861,3 +1861,36 @@ button {
 .era-banner .unlocks {
   justify-content: center;
 }
+
+/* Catching up on time away */
+.catchup {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 8, 18, 0.6);
+}
+.catchup-box {
+  width: min(320px, calc(100vw - 32px));
+  padding: 16px;
+  background: var(--panel-solid);
+  border: 2px solid var(--line);
+  color: var(--text);
+  font-family: 'Pixelify Sans', monospace;
+}
+.catchup-title {
+  margin-bottom: 10px;
+  font-size: 16px;
+}
+.catchup .bar {
+  height: 8px;
+  background: var(--panel-3);
+}
+.catchup .bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--good, #7bc950);
+}

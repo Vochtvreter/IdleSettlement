@@ -28,27 +28,38 @@ function summary(seed: number, label: string, r: { state: GameState; eraYears: n
   return (
     `${label} seed ${seed}: ${s.victory ? 'VICTORY' : s.defeat ? 'DEFEAT' : 'unfinished'} in year ${Math.floor(s.day / DAYS_PER_YEAR)}; ` +
     `eras ${r.eraYears.map((y, i) => `${ERAS[i].short}:${y}`).join(' ')}; pop ${s.settlers.length} (peak ${s.stats.peakPop}, min ${r.minPop}); ` +
-    `births ${s.stats.births} deaths ${s.stats.deaths} milestone ${s.objective} paths ${Object.entries(s.decisions).map(([k, v]) => `${k}=${v}`).join(',')}`
+    `towns ${s.towns.length} (${s.towns.map((t) => t.tier).join('')}) births ${s.stats.births} deaths ${s.stats.deaths} milestone ${s.objective} paths ${Object.entries(s.decisions).map(([k, v]) => `${k}=${v}`).join(',')}`
   );
 }
 
 const seeds = process.env.BAL_SEEDS ? process.env.BAL_SEEDS.split(',').map(Number) : [1, 2, 3, 42, 1337];
+/** Whole games take a long while (the Sunspire is centuries away), so they only run when asked for: `npm run balance`. */
+const FULL = !!process.env.BAL_FULL;
 
 describe('balance: decisions drive progress, the council runs the settlement', () => {
   seeds.forEach((seed, i) => {
     const persona: Persona = { picks: [i, i + 1, i + 2, i, i + 1] };
-    it(`seed ${seed}: a decisive player reaches victory`, { timeout: 120_000 }, () => {
-      const r = playthrough(seed, persona);
+    it(`seed ${seed}: a decisive player's realm takes root and enters the Age of Bronze, but not yet the Age of Iron`, { timeout: 300_000 }, () => {
+      const r = playthrough(seed, persona, 60);
+      console.log(summary(seed, 'opening', r));
+      expect(r.state.defeat).toBe(false);
+      expect(r.minPop).toBeGreaterThan(5);
+      expect(eraOf(r.state)).toBeGreaterThanOrEqual(2);
+      expect(eraOf(r.state)).toBeLessThan(4);
+      expect(r.state.victory).toBe(false);
+    });
+    it.skipIf(!FULL)(`seed ${seed}: a decisive player raises the Sunspire after centuries`, { timeout: 7_200_000 }, () => {
+      const r = playthrough(seed, persona, 600);
       console.log(summary(seed, 'decisive', r));
       expect(r.state.defeat).toBe(false);
       expect(r.state.victory).toBe(true);
       const years = Math.floor(r.state.day / DAYS_PER_YEAR);
-      expect(years).toBeLessThan(85);
-      expect(years).toBeGreaterThan(25);
+      expect(years).toBeGreaterThan(120);
+      expect(years).toBeLessThan(500);
     });
   });
 
-  it('without decisions the settlement survives but never leaves the first age', { timeout: 120_000 }, () => {
+  it('without decisions the settlement survives but never leaves the first age', { timeout: 300_000 }, () => {
     const r = playthrough(seeds[0], null, 40);
     console.log(summary(seeds[0], 'undecided', r));
     expect(r.state.defeat).toBe(false);

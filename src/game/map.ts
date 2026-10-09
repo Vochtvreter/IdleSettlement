@@ -134,7 +134,7 @@ function tryGenerate(seed: number, attempt: number, force = false): WorldMap | n
 
   // --- continents: a large home continent in the mild middle latitudes, others to the north and south
   const blobs: Blob[] = [];
-  const main: Blob = { cx: W * rng.range(0.4, 0.6), cy: H * rng.range(0.44, 0.56), rx: W * rng.range(0.17, 0.21), ry: H * rng.range(0.2, 0.25) };
+  const main: Blob = { cx: W * rng.range(0.4, 0.6), cy: H * rng.range(0.44, 0.56), rx: W * rng.range(0.12, 0.15), ry: H * rng.range(0.15, 0.19) };
   blobs.push(main);
   const fits = (b: Blob, pad: number) =>
     blobs.every((o) => {
@@ -157,11 +157,12 @@ function tryGenerate(seed: number, attempt: number, force = false): WorldMap | n
     }
   };
   // Lands in the cold north, the hot south, and either side of home.
-  place(2, [0.09, 0.14], [0.09, 0.14], [0.06, 0.24], 1.05);
-  place(2, [0.09, 0.14], [0.09, 0.14], [0.76, 0.94], 1.05);
-  place(2, [0.07, 0.11], [0.1, 0.16], null, 1.05);
-  // Scattered isles.
-  place(9, [0.02, 0.04], [0.025, 0.05], null, 1.1);
+  place(3, [0.07, 0.12], [0.07, 0.12], [0.06, 0.24], 1.05);
+  place(3, [0.07, 0.12], [0.07, 0.12], [0.76, 0.94], 1.05);
+  place(4, [0.05, 0.09], [0.07, 0.13], null, 1.05);
+  // Smaller lands and scattered isles, for colonies across the sea.
+  place(8, [0.025, 0.045], [0.03, 0.06], null, 1.1);
+  place(30, [0.008, 0.018], [0.01, 0.024], null, 1.15);
 
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
@@ -255,11 +256,11 @@ function tryGenerate(seed: number, attempt: number, force = false): WorldMap | n
   // --- rivers: traced downhill from the high ground to the sea
   const sources: number[] = [];
   for (let i = 0; i < n; i++) if (terrain[i] === T.Mountain || terrain[i] === T.Hills) sources.push(i);
-  const riverCount = Math.max(6, Math.min(44, Math.floor(landH.length / 650)));
+  const riverCount = Math.max(6, Math.min(400, Math.floor(landH.length / 650)));
   for (let r = 0; r < riverCount && sources.length; r++) {
     let cur = sources[rng.int(0, sources.length - 1)];
     const seen = new Set<number>();
-    for (let step = 0; step < 260; step++) {
+    for (let step = 0; step < 900; step++) {
       seen.add(cur);
       const x = tx(cur);
       const y = ty(cur);

@@ -95,6 +95,7 @@ export class UI {
       [1, '1×', 'Normal speed (1)'],
       [2, '2×', 'Fast (2)'],
       [5, '5×', 'Very fast (3)'],
+      [10, '10×', 'The years fly by (4)'],
     ];
     for (const [n, label, title] of speeds) {
       const b = h('button', { class: 'icon-btn', title }, label);
@@ -445,7 +446,7 @@ export class UI {
         }
       } else if (!d.territory[tile] && s.techs.includes('scouting')) {
         // What pioneers would make of this place.
-        const v = siteValues(s.seed)[tile];
+        const v = siteValues(s.seed).at(tile);
         if (v > 0) {
           const p = siteProfile(s.seed, tile);
           parts.push(h('div', { class: 'row' }, 'As a home for pioneers', h('b', null, `${Math.round(v)} · ${siteCalling(p)}${p.water ? '' : ', no fresh water'}`)));
@@ -756,7 +757,7 @@ export class UI {
         h('div', { class: 'stat' }, h('div', { class: 'k' }, 'Births · Deaths · Arrivals'), h('div', { class: 'v' }, `${r.births} · ${r.deaths} · ${r.arrivals}`)),
         ...rows,
       ),
-      h('p', { style: 'font-size:12px;color:var(--muted)' }, 'Time away passes at half speed, up to 12 years.'),
+      h('p', { style: 'font-size:12px;color:var(--muted)' }, 'Time away passes at half speed, up to 40 years.'),
       h('div', { class: 'acts' }, h('button', { class: 'btn primary', onclick: () => close() }, 'Welcome back')),
     ]);
   }
@@ -939,10 +940,10 @@ export class UI {
             'ul',
             null,
             h('li', null, 'Drag to pan · scroll / pinch to zoom · ', h('span', { class: 'kbd' }, 'WASD'), ' pan'),
-            h('li', null, h('span', { class: 'kbd' }, 'Space'), ' pause · ', h('span', { class: 'kbd' }, '1'), h('span', { class: 'kbd' }, '2'), h('span', { class: 'kbd' }, '3'), ' speed · ', h('span', { class: 'kbd' }, 'H'), ' home · ', h('span', { class: 'kbd' }, 'M'), ' realm · ', h('span', { class: 'kbd' }, 'Esc'), ' cancel / menu'),
+            h('li', null, h('span', { class: 'kbd' }, 'Space'), ' pause · ', h('span', { class: 'kbd' }, '1'), h('span', { class: 'kbd' }, '2'), h('span', { class: 'kbd' }, '3'), h('span', { class: 'kbd' }, '4'), ' speed · ', h('span', { class: 'kbd' }, 'H'), ' home · ', h('span', { class: 'kbd' }, 'M'), ' realm · ', h('span', { class: 'kbd' }, 'Esc'), ' cancel / menu'),
             h('li', null, 'Shift-click: commission several buildings in a row'),
           ),
-          h('p', { style: 'color:var(--muted);font-size:13px' }, 'Your game saves automatically. While you are away, time passes at half speed (up to 12 years).'),
+          h('p', { style: 'color:var(--muted);font-size:13px' }, 'Your game saves automatically. While you are away, time passes at half speed (up to 40 years).'),
         ),
         h('div', { class: 'acts' }, h('button', { class: 'btn primary', onclick: () => close() }, 'Got it')),
       ],
@@ -978,6 +979,7 @@ export class UI {
       } else if (e.key === '1') this.game.setSpeed(1);
       else if (e.key === '2') this.game.setSpeed(2);
       else if (e.key === '3') this.game.setSpeed(5);
+      else if (e.key === '4') this.game.setSpeed(10);
       else if (e.key === 'h' || e.key === 'H') this.centerHearth();
       else if (e.key === 'e' || e.key === 'E') this.panels.setTab('decide');
       else if (e.key === 'p' || e.key === 'P') this.panels.setTab('people');

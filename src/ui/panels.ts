@@ -220,7 +220,7 @@ export class Panels {
       case 'build':
         return `b:${s.techs.length}:${eraOf(s)}:${worksQueue(s).map((b) => b.id).join(',')}:${this.game.view.placing}:${s.council.build}:${s.towns.length}`;
       case 'realm':
-        return `m:${s.towns.map((t) => `${t.id}.${t.tier}`).join(',')}:${s.expeditions.map((e) => e.id).join(',')}:${s.routes.length}:${ties(s).filter((t) => t.stage === 'none' || t.stage === 'trail').length}:${s.techs.length}:${s.council.build}:${this.choosing}:${s.buildings.filter((b) => b.type === 'harbour' && b.done).length}`;
+        return `m:${s.towns.map((t) => `${t.id}.${t.tier}`).join(',')}:${s.expeditions.map((e) => e.id).join(',')}:${s.routes.length}:${ties(s).filter((t) => t.stage === 'none' || t.stage === 'trail').length}:${s.towns.length}:${s.techs.length}:${s.council.build}:${this.choosing}:${s.buildings.filter((b) => b.type === 'harbour' && b.done).length}`;
       case 'research':
         return `r:${s.techs.length}:${eraOf(s)}:${s.council.research}:${s.pin}:${s.objective > PIN_UNLOCK}`;
       case 'log':
@@ -682,8 +682,12 @@ export class Panels {
       });
     }
     // Ways still growing between settlements on the same land.
-    for (const t of ties(s)) {
-      if (t.stage === 'route' || t.stage === 'paved') continue;
+    // The ways closest to becoming routes (a great realm has many more).
+    const growing = ties(s)
+      .filter((t) => t.stage === 'none' || t.stage === 'trail')
+      .sort((a, b) => b.traffic - a.traffic || a.a - b.a || a.b - b.b)
+      .slice(0, 8);
+    for (const t of growing) {
       const A = s.towns.find((x) => x.id === t.a)?.name;
       const B = s.towns.find((x) => x.id === t.b)?.name;
       const bar = h('i');

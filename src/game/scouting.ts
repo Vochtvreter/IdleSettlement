@@ -61,22 +61,27 @@ function scoutCost(map: ReturnType<typeof getMap>, net: Uint8Array, i: number) {
   return SCOUT_DAYS[map.terrain[i]] ?? Infinity;
 }
 
-/** Unknown tiles in every box of the map, from a summed-area table of the fog. */
-function unknownCounter(state: GameState) {
-  const W = MAP_W + 1;
-  const sat = new Int32Array(W * (MAP_H + 1));
-  for (let y = 0; y < MAP_H; y++) {
+/** Unknown tiles in every box within a window of the map, from a summed-area table of the fog. */
+function unknownCounter(state: GameState, wx0: number, wy0: number, wx1: number, wy1: number) {
+  wx0 = Math.max(0, wx0);
+  wy0 = Math.max(0, wy0);
+  wx1 = Math.min(MAP_W, wx1);
+  wy1 = Math.min(MAP_H, wy1);
+  const W = wx1 - wx0 + 1;
+  const H = wy1 - wy0;
+  const sat = new Int32Array(W * (H + 1));
+  for (let y = 0; y < H; y++) {
     let row = 0;
-    for (let x = 0; x < MAP_W; x++) {
-      row += state.explored[idx(x, y)] ? 0 : 1;
+    for (let x = 0; x < W - 1; x++) {
+      row += state.explored[idx(wx0 + x, wy0 + y)] ? 0 : 1;
       sat[(y + 1) * W + x + 1] = sat[y * W + x + 1] + row;
     }
   }
   return (i: number, r: number) => {
-    const x0 = Math.max(0, tx(i) - r);
-    const y0 = Math.max(0, ty(i) - r);
-    const x1 = Math.min(MAP_W, tx(i) + r + 1);
-    const y1 = Math.min(MAP_H, ty(i) + r + 1);
+    const x0 = Math.max(wx0, tx(i) - r) - wx0;
+    const y0 = Math.max(wy0, ty(i) - r) - wy0;
+    const x1 = Math.min(wx1, tx(i) + r + 1) - wx0;
+    const y1 = Math.min(wy1, ty(i) + r + 1) - wy0;
     return sat[y1 * W + x1] - sat[y0 * W + x1] - sat[y1 * W + x0] + sat[y0 * W + x0];
   };
 }
@@ -102,9 +107,10 @@ export function planTrip(state: GameState, town: number): TripPlan | null {
   const n = MAP_W * MAP_H;
   // Unknown land well within sight of each step (a square inside their circle of sight).
   const rb = sightOf(state) - 1;
-  const unknown = unknownCounter(state);
   // Out and back, with a night in camp for every few days on the move, and something to spare.
   const budget = provisions(state) * speedOf(state) * 0.28;
+  const R = Math.ceil(budget / 0.2) + rb + 2;
+  const unknown = unknownCounter(state, home.x - R, home.y - R, home.x + R + 1, home.y + R + 1);
   const dist = new Float32Array(n).fill(Infinity);
   const prev = new Int32Array(n).fill(-1);
   const gain = new Float32Array(n);
@@ -356,7 +362,7 @@ function comeHome(state: GameState, ctx: Ctx, e: Expedition) {
   // The best free land they saw, if it is worth sending pioneers to.
   const values = siteValues(state.seed);
   let best = -1;
-  for (const i of found) if (values[i] >= 20 && (best < 0 || values[i] > values[best]) && siteFree(state, i)) best = i;
+  for (const i of found) if (values.at(i) >= 20 && (best < 0 || values.at(i) > values.at(best)) && siteFree(state, i)) best = i;
   const hungry = (e.food ?? 0) < 0 ? 'Hungry and footsore, the' : 'The';
   let text = `${hungry} scouts are back in ${from.name} after ${days} days in the wilds, with charts of ${n} tiles of land.`;
   if (best >= 0) {
@@ -407,7 +413,7 @@ function stepParties(state: GameState, ctx: Ctx, rng: Rng, kill: Kill) {
         if (t.risk > toll.risk) toll = t;
         look(state, e, seen, i, sight);
         if (e.messenger) trail.push(i);
-        if (values[i] >= PRIME && e.at <= (e.turn ?? 0) && maySettle(state, e) && siteFree(state, i)) {
+        if (values.at(i) >= PRIME && e.at <= (e.turn ?? 0) && maySettle(state, e) && siteFree(state, i)) {
           settleHere(state, ctx, rng, e);
           break;
         }
