@@ -80,6 +80,8 @@ export class Panels {
   /** Choosing a site for pioneers: the candidates on show. */
   private choosing = false;
   private choices: SiteChoice[] = [];
+  /** Settlement the choices were found from. */
+  private choicesFrom = 0;
   private badges: Partial<Record<Tab, HTMLElement>> = {};
   private tabBtns: Partial<Record<Tab, HTMLElement>> = {};
   /** Tabs on show; null until the first update after a game is attached. */
@@ -572,6 +574,7 @@ export class Panels {
       sfx('click');
       this.choosing = !this.choosing;
       this.choices = this.choosing ? findSites(this.game.state, from.id, { limit: 6 }) : [];
+      this.choicesFrom = from.id;
       this.game.view.siteChoices = this.choices;
       this.game.view.siteHover = -1;
       this.sig = '';
@@ -608,7 +611,7 @@ export class Panels {
           this.game.view.siteHover = k;
         });
         go.addEventListener('click', () => {
-          const r = launchPioneers(this.game.state, this.game.tickCtx(), from.id, c);
+          const r = launchPioneers(this.game.state, this.game.tickCtx(), this.choicesFrom, c);
           if (!r.ok) {
             sfx('error');
             go.textContent = r.reason;

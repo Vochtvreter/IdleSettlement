@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DAYS_PER_YEAR, TIERS } from '../src/game/data';
 import { census, derived, invalidate } from '../src/game/derived';
-import { hearthOf } from '../src/game/land';
+import { hearthOf, landMax, passableMask, TRAIL_WOOD, layRoad } from '../src/game/land';
 import { getMap, idx, inBounds, tx, ty } from '../src/game/map';
 import { findSites, launchPioneers, openRoute, routeOptions, tierFor, tradeKnowledge } from '../src/game/realm';
 import { Rng } from '../src/game/rng';
@@ -94,6 +94,48 @@ describe('pioneers', () => {
     // The trail joins the new settlement to the capital.
     expect(derived(s).towns.get(town.id)!.link).not.toBe('none');
     expect(s.explored[site.tile]).toBe(1);
+  });
+});
+
+describe('trails', () => {
+  it('keep their thinned woods, and stay passable once paved', () => {
+    const s = readyRealm(2);
+    found(s);
+    const m = landMax(2);
+    const wooded = s.trails.filter((i) => m.wood[i] > 0);
+    for (let k = 0; k < 20; k++) tick(s, ctx());
+    for (const i of wooded) if (s.trails.includes(i)) expect(s.land.wood[i]).toBeGreaterThan(0);
+    for (const i of wooded) if (s.trails.includes(i)) expect(s.land.wood[i]).toBeLessThanOrEqual(m.wood[i] * TRAIL_WOOD + 1e-6);
+    const pass = passableMask(s);
+    const crossing = s.trails.filter((i) => pass[i] && [T.River, T.Mountain].includes(getMap(2).terrain[i]));
+    layRoad(s, s.trails.slice());
+    const after = passableMask(s);
+    for (const i of crossing) expect(after[i]).toBe(1);
+  });
+});
+
+describe('pioneers keep to free land', () => {
+  it('will not set out for land that has since been settled, or from the wrong place', () => {
+    const s = readyRealm(2);
+    const sites = findSites(s, 1);
+    found(s);
+    const taken = sites.find((x) => Math.hypot(tx(x.tile) - s.towns[1].x, ty(x.tile) - s.towns[1].y) < 15);
+    if (taken) expect(launchPioneers(s, ctx(), 1, taken).ok).toBe(false);
+    const next = findSites(s, 1)[0];
+    if (next) expect(launchPioneers(s, ctx(), s.towns[1].id, next).ok).toBe(false);
+  });
+});
+
+describe('determinism', () => {
+  it('plays out the same after saving and loading', () => {
+    const a = newGame(4, 0, 0);
+    for (let k = 0; k < 60; k++) tick(a, ctx());
+    const b = deserialize(serialize(a))!;
+    for (let k = 0; k < 200; k++) {
+      tick(a, ctx());
+      tick(b, ctx());
+    }
+    expect(serialize({ ...b, lastSave: 0 })).toBe(serialize({ ...a, lastSave: 0 }));
   });
 });
 

@@ -421,7 +421,7 @@ export function growLand(
   for (const i of m.forestTiles) {
     const max = m.wood[i];
     const v = wood[i];
-    if (opts.occupied[i]) {
+    if (opts.occupied[i] && !opts.trail[i]) {
       // Trees on a building site stand until the builders fell them; elsewhere they are gone for good.
       if (v && !opts.sites[i]) setStock(state, 'wood', i, 0);
       continue;
@@ -486,6 +486,8 @@ export function passableMask(state: GameState): Uint8Array {
   for (let i = 0; i < n; i++) pass[i] = blocked(map, i) ? 0 : 1;
   for (const b of state.buildings) if (b.type === 'bridge' && b.done) pass[idx(b.x, b.y)] = 1;
   for (const i of state.trails) pass[i] = 1;
+  // A trail paved into road keeps its fords and passes.
+  for (const i of state.roads) pass[i] = 1;
   for (const i of state.graded) pass[i] = 1;
   return pass;
 }
@@ -699,7 +701,7 @@ export function packLand(state: GameState): Record<LandLayer, number[]> {
   for (const l of LAYERS) {
     const list: number[] = [];
     const a = state.land[l];
-    for (let i = 0; i < a.length; i++) if (Math.abs(a[i] - m[l][i]) > 1e-6) list.push(i, Math.round(a[i] * 1000) / 1000);
+    for (let i = 0; i < a.length; i++) if (Math.abs(a[i] - m[l][i]) > 1e-6) list.push(i, a[i]); // exact, so a reloaded game plays out the same
     out[l] = list;
   }
   return out;

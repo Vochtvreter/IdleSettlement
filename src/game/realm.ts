@@ -109,9 +109,9 @@ function linked(state: GameState, a: number, b: number, d: Derived) {
 function migrate(state: GameState) {
   if (state.towns.length < 2) return;
   const d = derived(state);
-  const c = census(state);
-  const free = (id: number) => (d.towns.get(id)?.housing ?? 0) - (c.residents.get(id) ?? 0);
-  const short = (id: number) => (d.towns.get(id)?.fullSlots ?? 0) - (c.adults.get(id) ?? 0);
+  // Read the census afresh each time: people moved earlier in this pass count where they now live.
+  const free = (id: number) => (d.towns.get(id)?.housing ?? 0) - (census(state).residents.get(id) ?? 0);
+  const short = (id: number) => (d.towns.get(id)?.fullSlots ?? 0) - (census(state).adults.get(id) ?? 0);
   let moved = 0;
   for (const to of state.towns) {
     if (free(to.id) <= 0) continue;
@@ -122,7 +122,7 @@ function migrate(state: GameState) {
     for (const s of state.towns) {
       if (s.id === to.id || !linked(state, s.id, to.id, d)) continue;
       const crowd = -free(s.id);
-      const spare = (c.adults.get(s.id) ?? 0) - (d.towns.get(s.id)?.fullSlots ?? 0) - (s.id === state.towns[0].id ? 8 : 2);
+      const spare = (census(state).adults.get(s.id) ?? 0) - (d.towns.get(s.id)?.fullSlots ?? 0) - (s.id === state.towns[0].id ? 8 : 2);
       const push = Math.max(crowd > 0 ? crowd + 2 : 0, pull && spare > 0 ? spare : 0);
       if (push > best) (best = push), (from = s);
     }
@@ -440,9 +440,25 @@ export function pioneerStatus(state: GameState, fromTown: number, sea = false): 
   const adults = census(state).adults.get(fromTown) ?? 0;
   const need = pioneerCount(state);
   if (adults < need + 6) return { ok: false, reason: `Needs ${need + 6} adults living there` };
+  if (ablePioneers(state, fromTown).length < need) return { ok: false, reason: 'Too few young adults to make the journey' };
   const cost = expeditionCost(state, sea);
   if (!canAfford(state, cost)) return { ok: false, reason: 'Not enough supplies' };
   return { ok: true };
+}
+
+/** Who can go: adults in their prime, youngest first. */
+function ablePioneers(state: GameState, fromTown: number) {
+  const able = state.settlers.filter((s) => s.town === fromTown && isAdult(state, s) && ageOf(state, s) < 40);
+  able.sort((a, b) => ageOf(state, a) - ageOf(state, b) || a.id - b.id);
+  return able;
+}
+
+/** Whether a tile can still take a new hearth: free, outside every territory and far enough from other settlements. */
+export function siteFree(state: GameState, tile: number, exceptExpedition?: number) {
+  const d = derived(state);
+  if ((d.occupied[tile] && !d.trail[tile]) || d.territory[tile] || siteValues(state.seed)[tile] <= 0) return false;
+  if (!state.towns.every((t) => Math.hypot(t.x - tx(tile), t.y - ty(tile)) >= TOWN_SPACING)) return false;
+  return state.expeditions.every((e) => e.id === exceptExpedition || e.kind !== 'settle' || Math.hypot(tx(e.path[e.path.length - 1]) - tx(tile), ty(e.path[e.path.length - 1]) - ty(tile)) >= TOWN_SPACING);
 }
 
 export function pioneerCount(state: GameState) {
@@ -459,11 +475,12 @@ export function expeditionCost(_state: GameState, sea: boolean): Cost {
 export function launchPioneers(state: GameState, _ctx: Ctx, fromTown: number, site: SiteChoice): RealmResult {
   const st = pioneerStatus(state, fromTown, site.sea);
   if (!st.ok) return st;
+  const home0 = townById(state, fromTown);
+  if (!home0 || site.path[0] !== idx(home0.x, home0.y)) return { ok: false, reason: 'That way starts from another settlement' };
+  if (!siteFree(state, site.tile)) return { ok: false, reason: 'That land has been taken' };
+  const party = ablePioneers(state, fromTown).slice(0, pioneerCount(state));
+  if (party.length < pioneerCount(state)) return { ok: false, reason: 'Too few young adults to make the journey' };
   pay(state, expeditionCost(state, site.sea));
-  // The young and able go: adults in their prime, a few with their children.
-  const able = state.settlers.filter((s) => s.town === fromTown && isAdult(state, s) && ageOf(state, s) < 40);
-  able.sort((a, b) => ageOf(state, a) - ageOf(state, b) || a.id - b.id);
-  const party = able.slice(0, pioneerCount(state));
   for (const s of party) {
     s.town = 0;
     s.job = null;
@@ -489,7 +506,28 @@ export function autoPioneers(state: GameState, ctx: Ctx, fromTown: number, minVa
 /** Light a new hearth: the pioneers become its first people. */
 function foundSettlement(state: GameState, ctx: Ctx, e: Expedition, rng: Rng) {
   const map = getMap(state.seed);
-  const tile = e.path[e.path.length - 1];
+  let tile = e.path[e.path.length - 1];
+  if (!siteFree(state, tile, e.id)) {
+    // Someone settled here first: look for free land close by, or go home.
+    let best = -1;
+    let bd = Infinity;
+    for (let dy = -6; dy <= 6; dy++)
+      for (let dx = -6; dx <= 6; dx++) {
+        const x = tx(tile) + dx;
+        const y = ty(tile) + dy;
+        if (!inBounds(x, y) || !state.explored[idx(x, y)]) continue;
+        const j = idx(x, y);
+        const dd = Math.hypot(dx, dy);
+        if (dd < bd && siteFree(state, j, e.id)) (bd = dd), (best = j);
+      }
+    if (best < 0) {
+      for (const s of state.settlers) if (e.people.includes(s.id)) s.town = townById(state, e.from) ? e.from : state.towns[0].id;
+      recount(state);
+      note(state, `The pioneers found their chosen land already settled, and turned back home.`, 'info');
+      return;
+    }
+    tile = best;
+  }
   const used = new Set(state.towns.map((t) => t.name));
   let name = placeName(rng);
   for (let k = 0; k < 20 && used.has(name); k++) name = placeName(rng);

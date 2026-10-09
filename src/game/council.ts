@@ -199,13 +199,14 @@ function siteScore(state: GameState, type: BuildingId, i: number, mult: number, 
 
 const tileMemo = new WeakMap<Derived, Map<string, number | null>>();
 
-/** The best place for a building, anywhere in the realm or within one settlement. Memoised while nothing changes. */
+/** The best place for a building, anywhere in the realm or within one settlement. Memoised within a day. */
 function bestTile(state: GameState, type: BuildingId, town?: number): number | null {
   if (type === 'bridge') return bridgeTile(state);
   const d = derived(state);
   let memo = tileMemo.get(d);
   if (!memo) tileMemo.set(d, (memo = new Map()));
-  const key = `${type}:${town ?? ''}:${state.stats.tilesExplored}`;
+  // Per day: the land's totals change daily, and a stale choice would play out differently after a reload.
+  const key = `${type}:${town ?? ''}:${state.stats.tilesExplored}:${state.day}`;
   if (memo.has(key)) return memo.get(key)!;
   const at = new Map<number, BuildingId>();
   for (const b of state.buildings) for (const t of tilesOfB(b)) at.set(t, b.type);

@@ -425,7 +425,7 @@ export class MapView {
   private updatePlacement(state: GameState) {
     if (!this.placing) return;
     const d = derived(state);
-    const key = `${this.placing}:${state.buildings.length}:${d.sites.length}:${state.stats.tilesExplored}:${state.nextBuildingId}:${state.landEpoch}:${state.roads.length}`;
+    const key = `${this.placing}:${state.buildings.length}:${d.sites.length}:${state.stats.tilesExplored}:${state.nextBuildingId}:${state.landEpoch}:${state.roads.length}:${state.trails.length}:${state.towns.map((t) => t.tier).join()}:${eraOf(state)}`;
     if (key === this.placeKey) return;
     this.placeKey = key;
     this.placeValid.clear();
