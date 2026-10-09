@@ -216,11 +216,12 @@ function bestTile(state: GameState, type: BuildingId, town?: number): number | n
   let bestScore = -Infinity;
   for (const i of d.terrTiles) {
     if (town !== undefined && d.townAt[i] !== town) continue;
-    // The great work rises in the capital.
-    if (type === 'monument' && d.townAt[i] !== capital) continue;
+    // The great work rises in the capital, or in a city when the capital has no room left for it.
+    const elsewhere = type === 'monument' && d.townAt[i] !== capital;
+    if (elsewhere && (state.towns.find((t) => t.id === d.townAt[i])?.tier ?? 0) < 3) continue;
     const c = canPlace(state, type, i, d);
     if (!c.ok) continue;
-    const sc = siteScore(state, type, i, c.mult, at, d);
+    const sc = siteScore(state, type, i, c.mult, at, d) - (elsewhere ? 1000 : 0);
     if (sc > bestScore || (sc === bestScore && best !== null && i < best)) {
       bestScore = sc;
       best = i;
