@@ -1,7 +1,9 @@
-import { buildingAvailability, buildingUnlocked, cancelBuilding, research, setJobTarget, techStatus } from '../game/actions';
+import { buildingAvailability, buildingUnlocked, cancelBuilding, prioritise, research, setJobTarget, techStatus, worksQueue } from '../game/actions';
 import {
+  BIOMES,
   BUILD_ORDER,
   BUILDING_DEFS,
+  TIERS,
   DAYS_PER_YEAR,
   ERAS,
   JOB_DEFS,
@@ -12,7 +14,10 @@ import {
   TECH_DEFS,
   TECH_ORDER,
 } from '../game/data';
-import { derived, jobUnlocked } from '../game/derived';
+import { census, derived, jobUnlocked, type Link } from '../game/derived';
+import { fellLeft, siteStage, sizeOf } from '../game/land';
+import { getMap, idx, tx, ty } from '../game/map';
+import { expeditionCost, findSites, launchPioneers, launchVoyage, nextTierNeeds, openRoute, pioneerStatus, routeIncome, routeOptions, siteCalling, siteProfile, townTitle, type SiteChoice } from '../game/realm';
 import { ageOf, eraOf, seasonIndex, year } from '../game/state';
 import { buildMaterials, buildWork, careLevel, gathererCapacity, materialLimit, moraleTarget, popSummary, productivity, toolBonus, yieldEff } from '../game/sim';
 import { councilWish } from '../game/council';
@@ -72,6 +77,11 @@ export class Panels {
   private sig = '';
   private updaters: Updater[] = [];
   private logFilter: 'all' | 'life' | 'discovery' | 'events' = 'all';
+  /** Choosing a site for pioneers: the candidates on show. */
+  private choosing = false;
+  private choices: SiteChoice[] = [];
+  /** Settlement the choices were found from. */
+  private choicesFrom = 0;
   private badges: Partial<Record<Tab, HTMLElement>> = {};
   private tabBtns: Partial<Record<Tab, HTMLElement>> = {};
   /** Tabs on show; null until the first update after a game is attached. */
@@ -85,6 +95,7 @@ export class Panels {
       ['people', 'People', 'i_people'],
       ['build', 'Build', 'i_hammer'],
       ['research', 'Research', 'i_knowledge'],
+      ['realm', 'Realm', 'i_house'],
       ['log', 'Chronicle', 'i_star'],
     ];
     for (const [id, label, icon] of tabs) {
@@ -117,6 +128,10 @@ export class Panels {
 
   setTab(t: Tab) {
     if (!tabRevealed(this.game.state, t)) return;
+    if (t !== 'realm' && this.choosing) {
+      this.choosing = false;
+      this.game.view.siteChoices = [];
+    }
     this.tab = t;
     this.tabBtns[t]!.classList.remove('fresh');
     for (const el of this.tabsEl.querySelectorAll('.tab')) el.classList.toggle('active', (el as HTMLElement).dataset.tab === t);
@@ -148,6 +163,9 @@ export class Panels {
           break;
         case 'research':
           this.buildResearch(s);
+          break;
+        case 'realm':
+          this.buildRealm(s);
           break;
         case 'log':
           this.buildLog(s);
@@ -196,7 +214,9 @@ export class Panels {
       case 'people':
         return `p:${JOBS.filter((j) => jobUnlocked(s, j)).join(',')}:${s.settlers.length > 0}:${s.council.jobs}`;
       case 'build':
-        return `b:${s.techs.length}:${eraOf(s)}:${s.buildings.filter((b) => !b.done).map((b) => b.id).join(',')}:${this.game.view.placing}:${s.council.build}`;
+        return `b:${s.techs.length}:${eraOf(s)}:${worksQueue(s).map((b) => b.id).join(',')}:${this.game.view.placing}:${s.council.build}:${s.towns.length}`;
+      case 'realm':
+        return `m:${s.towns.map((t) => `${t.id}.${t.tier}`).join(',')}:${s.expeditions.map((e) => e.id).join(',')}:${s.routes.length}:${s.techs.length}:${s.council.build}:${this.choosing}:${s.buildings.filter((b) => b.type === 'harbour' && b.done).length}`;
       case 'research':
         return `r:${s.techs.length}:${eraOf(s)}:${s.council.research}:${s.pin}:${s.objective > PIN_UNLOCK}`;
       case 'log':
@@ -366,10 +386,11 @@ export class Panels {
   // ---------------------------------------------------------------- build
   private buildBuild(s: GameState) {
     const b = this.body;
-    const sites = s.buildings.filter((x) => !x.done);
+    const sites = worksQueue(s);
     if (sites.length) {
-      b.append(h('div', { class: 'section-title' }, `Construction (${sites.length})`));
-      for (const site of sites) {
+      b.append(h('div', { class: 'section-title' }, `Works queue (${sites.length})`));
+      b.append(h('div', { style: 'font-size:11px;color:var(--muted);margin:-2px 0 6px' }, 'Builders work down the queue: trees on a site are felled and rock levelled before the building goes up.'));
+      for (const [k, site] of sites.entries()) {
         const def = BUILDING_DEFS[site.type];
         const bar = h('i');
         const info = h('div', { class: 'ts', style: 'font-family:var(--mono);font-size:9px;color:var(--muted)' });
@@ -379,21 +400,40 @@ export class Panels {
           sfx('click');
           this.game.changed();
         });
-        const row = h('div', { class: 'queue-item' }, img(BUILDING_ICON(s, site.type), 2), h('div', null, h('div', null, def.name), h('div', { class: 'bar' }, bar), info), cancel);
+        const up = h('button', { class: 'btn small', title: 'Do this next' }, '↑');
+        up.addEventListener('click', () => {
+          prioritise(this.game.state, site.id);
+          sfx('click');
+          this.game.changed();
+        });
+        if (k === 0) up.setAttribute('disabled', '');
+        const town = s.towns.length > 1 ? s.towns.find((t) => t.id === site.town)?.name : '';
+        const [w, hh] = sizeOf(site.type);
+        const row = h(
+          'div',
+          { class: 'queue-item' },
+          img(BUILDING_ICON(s, site.type), 2),
+          h('div', null, h('div', null, def.name, h('span', { style: 'color:var(--muted);font-size:11px' }, `${w > 1 || hh > 1 ? ` ${w}×${hh}` : ''}${town ? ` · ${town}` : ''}`)), h('div', { class: 'bar' }, bar), info),
+          h('div', { style: 'display:flex;gap:4px' }, up, cancel),
+        );
         row.addEventListener('click', (e) => {
-          if (e.target === cancel) return;
-          this.game.view.centerOn(site.x + 0.5, site.y + 0.5);
+          if (e.target === cancel || e.target === up) return;
+          this.game.view.centerOn(site.x + w / 2, site.y + hh / 2);
         });
         row.style.cursor = 'pointer';
         b.append(row);
         this.updaters.push(() => {
           const g = this.game.state;
-          const p = site.progress / buildWork(g, site.type);
-          bar.style.width = `${Math.min(100, p * 100)}%`;
+          const stage = siteStage(g, site);
+          const prepLeft = fellLeft(g, site) + (site.prep ?? 0);
+          const p = stage === 'building' ? site.progress / buildWork(g, site.type) : site.prepTotal ? 1 - prepLeft / site.prepTotal : 0;
+          bar.style.width = `${Math.min(100, Math.max(0, p) * 100)}%`;
+          bar.style.background = stage === 'felling' ? 'var(--good)' : stage === 'levelling' ? '#c3cad4' : '';
           const builders = popSummary(g).jobs.builder;
-          const stalled = def.materials && materialLimit(g, site.type) < 0.01;
-          const first = g.buildings.find((x) => !x.done)?.id === site.id;
-          info.textContent = stalled ? 'Waiting for materials…' : first ? (builders ? `${Math.round(p * 100)}% · ${builders} builder${builders > 1 ? 's' : ''}` : `${Math.round(p * 100)}% · assign builders!`) : `${Math.round(p * 100)}% · queued`;
+          const stalled = stage === 'building' && def.materials && materialLimit(g, site.type) < 0.01;
+          const first = worksQueue(g)[0]?.id === site.id;
+          const what = stage === 'felling' ? 'Felling trees' : stage === 'levelling' ? 'Levelling rock' : 'Building';
+          info.textContent = stalled ? 'Waiting for materials…' : `${what} · ${Math.round(p * 100)}%${first ? (builders ? ` · ${builders} builder${builders > 1 ? 's' : ''}` : ' · assign builders!') : ' · queued'}`;
           info.style.color = stalled || (!builders && first) ? 'var(--ember)' : '';
         });
       }
@@ -421,7 +461,7 @@ export class Panels {
       const card = h(
         'button',
         { class: 'card' + (unlocked ? '' : ' locked') + (this.game.view.placing === t ? ' selected' : '') },
-        h('div', { class: 'top' }, img(BUILDING_ICON(s, t), 2), h('div', null, h('div', { class: 'nm' }, def.name), cnt)),
+        h('div', { class: 'top' }, img(BUILDING_ICON(s, t), 2), h('div', null, h('div', { class: 'nm' }, def.name, def.size ? h('span', { class: 'size' }, ` ${def.size[0]}×${def.size[1]}`) : null), cnt)),
         h('div', { class: 'benefit' }, def.benefit),
         costHolder,
         req,
@@ -429,7 +469,7 @@ export class Panels {
       tip(card, () => {
         const g = this.game.state;
         const extra = def.materials ? `<div class="sep"></div>As it rises it consumes: ${Object.entries(buildMaterials(g, t)!).map(([k, v]) => `${fmt(v ?? 0)} ${k}`).join(', ')}.` : '';
-        return `<h4>${def.name}</h4>${def.desc}${def.hint ? `<div class="sep"></div><span class="muted">${def.hint}</span>` : ''}${extra}${!unlocked ? `<div class="sep"></div><span style="color:var(--bad)">Requires ${TECH_DEFS[def.tech!].name}</span>` : ''}<div class="sep"></div><span class="muted">Work: ${buildWork(g, t)} · Built: ${derived(g).counts[t] ?? 0}</span>`;
+        return `<h4>${def.name}</h4>${def.desc}${def.size ? `<div class="sep"></div><span class="muted">Covers ${def.size[0]}×${def.size[1]} tiles. Forest on the site is felled and rock levelled first.</span>` : ''}${def.hint ? `<div class="sep"></div><span class="muted">${def.hint}</span>` : ''}${extra}${!unlocked ? `<div class="sep"></div><span style="color:var(--bad)">Requires ${TECH_DEFS[def.tech!].name}</span>` : ''}<div class="sep"></div><span class="muted">Work: ${buildWork(g, t)} · Built: ${derived(g).counts[t] ?? 0}</span>`;
       });
       card.addEventListener('click', () => {
         if (!unlocked) return;
@@ -446,11 +486,193 @@ export class Panels {
         const g = this.game.state;
         const n = g.buildings.filter((x) => x.type === t).length;
         cnt.textContent = def.max ? `${n}/${def.max} built` : n ? `${n} built` : '';
+        if (def.tier) card.classList.toggle('locked', !g.towns.some((x) => x.tier >= def.tier!) || !unlocked);
         costHolder.replaceChildren(costEl(g, def.cost));
         const ok = buildingAvailability(g, t).ok;
         card.classList.toggle('unaffordable', unlocked && !ok);
         card.style.opacity = unlocked ? (ok ? '1' : '0.72') : '';
       });
+    }
+  }
+
+  // ---------------------------------------------------------------- realm
+  private buildRealm(s: GameState) {
+    const b = this.body;
+    const d = derived(s);
+    const map = getMap(s.seed);
+    const home = map.island[idx(s.towns[0].x, s.towns[0].y)];
+    const LINK: Record<Link, string> = {
+      capital: 'The capital',
+      road: 'Joined by road',
+      route: 'Joined by a trade route',
+      trail: 'Joined by a trail: 85% of its goods arrive',
+      none: 'Cut off: only half its goods arrive. Open a trade route.',
+    };
+    b.append(h('div', { class: 'section-title' }, `Settlements (${s.towns.length})`));
+    for (const t of s.towns) {
+      const info = d.towns.get(t.id)!;
+      const people = h('b');
+      const needs = h('div', { class: 'ts', style: 'font-size:11px;color:var(--muted)' });
+      const across = map.island[idx(t.x, t.y)] !== home;
+      const card = h(
+        'div',
+        { class: 'queue-item town-card' + (t === s.towns[0] ? ' capital' : '') },
+        img(t.tier >= 2 ? 'house' : 'hut0', 2),
+        h(
+          'div',
+          { style: 'flex:1' },
+          h('div', null, h('span', { class: 'town-name' }, t.name), ' ', h('span', { class: 'town-tier' }, townTitle(s, t))),
+          h('div', { class: 'ts', style: 'font-size:11px' }, `${BIOMES[info.biome].name}${across ? ' · overseas' : ''} · `, people, ` · ${info.buildings} buildings`),
+          h('div', { class: 'ts', style: `font-size:11px;color:${info.link === 'none' ? 'var(--ember)' : 'var(--muted)'}` }, LINK[info.link]),
+          needs,
+        ),
+      );
+      tip(card, () => `<h4>${t.name}</h4>${BIOMES[info.biome].desc}<div class="sep"></div>${TIERS[t.tier].name}, founded in year ${Math.floor(t.founded / DAYS_PER_YEAR) + 1}.${info.specialty ? ` It lives by ${townTitle(s, t).split(' ')[0].toLowerCase()}.` : ''}`);
+      card.style.cursor = 'pointer';
+      card.addEventListener('click', () => this.game.view.centerOn(t.x + 0.5, t.y + 0.5));
+      b.append(card);
+      this.updaters.push(() => {
+        const g = this.game.state;
+        const c = census(g);
+        const dd = derived(g);
+        people.textContent = `${c.residents.get(t.id) ?? 0}/${dd.towns.get(t.id)?.housing ?? 0} people`;
+        const n = nextTierNeeds(g, t);
+        needs.textContent = t.tier + 1 < TIERS.length ? `To become a ${TIERS[t.tier + 1].name.toLowerCase()}: ${n.length ? n.join(', ') : 'ready'}` : 'The greatest of cities.';
+      });
+    }
+
+    // Pioneers and voyages
+    b.append(h('div', { class: 'section-title' }, 'Pioneers'));
+    if (s.expeditions.length) {
+      for (const e of s.expeditions) {
+        const bar = h('i');
+        const from = s.towns.find((t) => t.id === e.from)?.name ?? '';
+        const label = e.kind === 'voyage' ? `A galley out of ${from}, charting the seas` : `${e.people.length} pioneers from ${from}`;
+        const row = h('div', { class: 'queue-item' }, img(e.kind === 'voyage' ? 'i_scout' : 'i_flag', 2), h('div', { style: 'flex:1' }, h('div', null, label), h('div', { class: 'bar' }, bar)));
+        row.style.cursor = 'pointer';
+        row.addEventListener('click', () => {
+          const i = e.path[e.at];
+          this.game.view.centerOn(tx(i) + 0.5, ty(i) + 0.5);
+        });
+        b.append(row);
+        this.updaters.push(() => (bar.style.width = `${Math.round((e.at / Math.max(1, e.path.length - 1)) * 100)}%`));
+      }
+    }
+    const from = [...s.towns].sort((a, c) => (census(s).adults.get(c.id) ?? 0) - (census(s).adults.get(a.id) ?? 0))[0];
+    const status = pioneerStatus(s, from.id);
+    b.append(
+      h(
+        'div',
+        { class: 'council-note' },
+        s.council.build
+          ? 'Scouts and pioneers look for prime land: fresh water, fertile soil, timber, stone, ore, game and fish. The council sends pioneers when the realm can spare them; you can choose a site yourself.'
+          : 'Scouts and pioneers look for prime land: fresh water, fertile soil, timber, stone, ore, game and fish.',
+      ),
+    );
+    const choose = h('button', { class: 'btn' + (this.choosing ? ' primary' : '') }, this.choosing ? 'Hide sites' : `Find a site for pioneers from ${from.name}`);
+    choose.addEventListener('click', () => {
+      sfx('click');
+      this.choosing = !this.choosing;
+      this.choices = this.choosing ? findSites(this.game.state, from.id, { limit: 6 }) : [];
+      this.choicesFrom = from.id;
+      this.game.view.siteChoices = this.choices;
+      this.game.view.siteHover = -1;
+      this.sig = '';
+      this.update();
+    });
+    b.append(h('div', { class: 'acts', style: 'display:flex;gap:6px;flex-wrap:wrap;margin:6px 0' }, choose));
+    if (!status.ok) b.append(h('div', { class: 'ts', style: 'font-size:11px;color:var(--muted)' }, `Pioneers cannot set out yet: ${status.reason}.`));
+    if (this.choosing) {
+      if (!this.choices.length) b.append(h('div', { class: 'ts', style: 'font-size:12px;color:var(--muted)' }, 'No good land is known within reach. Send scouts further, or build a harbour to look across the sea.'));
+      for (const [k, c] of this.choices.entries()) {
+        const p = siteProfile(s.seed, c.tile);
+        const calling = siteCalling(p);
+        const biome = BIOMES[map.biome[c.tile] as keyof typeof BIOMES].name;
+        const cost = expeditionCost(s, c.sea);
+        const go = h('button', { class: 'btn small primary' }, 'Send');
+        const row = h(
+          'div',
+          { class: 'queue-item site-choice' },
+          h('div', { class: 'site-rank' }, String(k + 1)),
+          h(
+            'div',
+            { style: 'flex:1' },
+            h('div', null, `${biome} ${calling} land${c.sea ? ' across the sea' : ''}`),
+            h('div', { class: 'ts', style: 'font-size:11px;color:var(--muted)' }, `Worth ${Math.round(c.value)} · ${Math.round(c.cost)} days away${p.water ? ' · fresh water' : ' · no fresh water'}${p.coast ? ' · coast' : ''}`),
+            costEl(s, cost),
+          ),
+          go,
+        );
+        row.addEventListener('mouseenter', () => (this.game.view.siteHover = k));
+        row.addEventListener('mouseleave', () => (this.game.view.siteHover = -1));
+        row.addEventListener('click', (e) => {
+          if (e.target === go) return;
+          this.game.view.centerOn(tx(c.tile) + 0.5, ty(c.tile) + 0.5);
+          this.game.view.siteHover = k;
+        });
+        go.addEventListener('click', () => {
+          const r = launchPioneers(this.game.state, this.game.tickCtx(), this.choicesFrom, c);
+          if (!r.ok) {
+            sfx('error');
+            go.textContent = r.reason;
+            return;
+          }
+          sfx('place');
+          this.choosing = false;
+          this.game.view.siteChoices = [];
+          this.game.changed();
+        });
+        b.append(row);
+      }
+    }
+    if (s.techs.includes('seafaring')) {
+      const port = s.buildings.find((x) => x.type === 'harbour' && x.done);
+      const sail = h('button', { class: 'btn' }, 'Send a galley to chart the seas');
+      if (!port) sail.setAttribute('disabled', '');
+      sail.addEventListener('click', () => {
+        const r = launchVoyage(this.game.state, port!.town ?? s.towns[0].id);
+        sfx(r.ok ? 'place' : 'error');
+        if (!r.ok) sail.textContent = r.reason;
+        this.game.changed();
+      });
+      b.append(h('div', { class: 'acts', style: 'margin:6px 0' }, sail));
+      if (!port) b.append(h('div', { class: 'ts', style: 'font-size:11px;color:var(--muted)' }, 'Build a harbour on the shore of the open sea first.'));
+    }
+
+    // Trade routes
+    b.append(h('div', { class: 'section-title' }, `Trade routes (${s.routes.length})`));
+    if (s.towns.length < 2) b.append(h('div', { class: 'ts', style: 'font-size:12px;color:var(--muted)' }, 'Trade needs a second settlement.'));
+    for (const r of s.routes) {
+      const A = s.towns.find((t) => t.id === r.a)?.name;
+      const B = s.towns.find((t) => t.id === r.b)?.name;
+      const inc = h('span');
+      const row = h('div', { class: 'queue-item' }, img(r.kind === 'sea' ? 'i_scout' : 'i_hammer', 2), h('div', { style: 'flex:1' }, h('div', null, `${A} – ${B}`), h('div', { class: 'ts', style: 'font-size:11px;color:var(--muted)' }, r.kind === 'sea' ? 'By galley · ' : 'By cart · ', inc)));
+      b.append(row);
+      this.updaters.push(() => {
+        const g = this.game.state;
+        const trails = new Set(g.trails);
+        const left = r.kind === 'land' ? r.path.filter((i, k) => k >= r.paved && trails.has(i)).length : 0;
+        inc.textContent = `+${routeIncome(g, r).toFixed(2)} knowledge/day${left ? ` · ${left} tiles of trail still to pave` : ''}`;
+      });
+    }
+    for (const o of routeOptions(s).slice(0, 8)) {
+      const A = s.towns.find((t) => t.id === o.a)?.name;
+      const B = s.towns.find((t) => t.id === o.b)?.name;
+      const btn = h('button', { class: 'btn small' + (o.ok ? ' primary' : '') }, 'Open');
+      if (!o.ok) btn.setAttribute('disabled', '');
+      btn.addEventListener('click', () => {
+        const r = openRoute(this.game.state, this.game.tickCtx(), o.a, o.b);
+        sfx(r.ok ? 'place' : 'error');
+        this.game.changed();
+      });
+      b.append(
+        h(
+          'div',
+          { class: 'queue-item route-option' },
+          h('div', { style: 'flex:1;min-width:0' }, h('div', null, `${A} – ${B}`, h('span', { style: 'color:var(--muted);font-size:11px' }, o.kind === 'sea' ? ' · by sea' : ' · by land')), o.ok ? costEl(s, o.cost) : h('div', { class: 'ts', style: 'font-size:11px;color:var(--muted)' }, o.reason ?? '')),
+          o.ok ? btn : null,
+        ),
+      );
     }
   }
 

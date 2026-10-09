@@ -201,6 +201,19 @@ export const DECISIONS: DecisionDef[] = [
     ],
   },
   {
+    id: 'expansion',
+    kind: 'policy',
+    name: 'Expansion',
+    prompt: 'Should your people found new settlements beyond the hearth?',
+    unlock: 6,
+    initial: 'steady',
+    options: [
+      { id: 'expand', name: 'Manifest Frontier', desc: 'Larger pioneer parties set out sooner and the realm aims for more settlements. Scouts +25%.', fx: { scout: 1.25 } },
+      { id: 'steady', name: 'Steady Growth', desc: 'Pioneers set out when the realm can spare them.', fx: {} },
+      { id: 'consolidate', name: 'Consolidate', desc: 'No new settlements. Builders +8%, morale +3.', fx: { builder: 1.08, morale: 3 } },
+    ],
+  },
+  {
     id: 'levy',
     kind: 'policy',
     name: 'Militia',
@@ -301,6 +314,11 @@ export const MILESTONES: MilestoneDef[] = [
   { text: 'Enter the Age of Wonders', hint: 'Choose your final path in the Decide tab.' },
   { text: 'Discover Architecture', hint: 'The final discovery — the council will lay the Sunspire’s foundations.' },
   { text: 'Complete the Sunspire', hint: 'It devours stone, wood, ore, tools and knowledge as it rises.' },
+  { text: 'Found a second settlement', hint: 'Pioneers blaze a trail to the best land your scouts have found. See the Realm tab.' },
+  { text: 'Open a trade route', hint: 'Join two villages by cart along a trail, or by galley between two harbours.' },
+  { text: 'Raise a city', hint: 'A settlement becomes a city with enough people and buildings in the Age of Bronze.' },
+  { text: 'Found a colony across the sea', hint: 'Build a harbour: galleys chart the coasts and carry pioneers to other lands.' },
+  { text: 'Raise a metropolis', hint: 'The greatest cities grow where the land is richest and trade flows.' },
 ];
 
 /** What each milestone unlocks, for display. */

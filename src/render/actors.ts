@@ -1,6 +1,6 @@
 import { ADULT_AGE, DAYS_PER_YEAR, ELDER_AGE, JOB_DEFS, MAP_H, MAP_W } from '../game/data';
 import { derived } from '../game/derived';
-import { landMax } from '../game/land';
+import { hearthOf, landMax, tilesOf } from '../game/land';
 import { getMap, idx, inBounds, isWater, tx, ty } from '../game/map';
 import { PASTURE_HERD } from '../game/sim';
 import { findPath } from './paths';
@@ -34,6 +34,8 @@ export interface Walker {
   path: number[];
   /** Keeps people side by side on a road instead of in single file. */
   lane: number;
+  /** Settlement they live in. */
+  town: number;
 }
 
 export interface Animal {
@@ -84,12 +86,18 @@ export class Actors {
     this.animalKey = '';
   }
 
-  private hearth(state: GameState): Building {
-    return state.buildings.find((b) => b.type === 'campfire') ?? state.buildings[0];
+  /** Where the camera looks, so the people and animals nearby are the ones shown. */
+  focus: [number, number] = [0, 0];
+
+  private hearth(state: GameState, town?: number): Building {
+    return hearthOf(state, town);
   }
 
-  private pickBuilding(state: GameState, types: string[], seed: number): Building | null {
-    const list = state.buildings.filter((b) => b.done && types.includes(b.type));
+  /** A building of one of these types, in the walker's own settlement when it has one. */
+  private pickBuilding(state: GameState, types: string[], seed: number, town?: number): Building | null {
+    const all = state.buildings.filter((b) => b.done && types.includes(b.type));
+    const own = town ? all.filter((b) => b.town === town) : [];
+    const list = own.length ? own : all.filter((b) => !town || b.town === town || !b.town);
     if (!list.length) return null;
     return list[seed % list.length];
   }
@@ -110,10 +118,10 @@ export class Actors {
   /** Decide where a walker goes next. Returns tile coordinates (floats, centre-ish). */
   private nextTarget(state: GameState, w: Walker): [number, number] {
     const map = getMap(state.seed);
-    const h = this.hearth(state);
+    const h = this.hearth(state, w.town);
     const jitter = (x: number, y: number, j = 0.35): [number, number] => [x + 0.5 + (Math.random() * 2 - 1) * j, y + 0.6 + (Math.random() * 2 - 1) * j];
     const land = (t: number) => !isWater(t) && t !== T.Mountain && t !== T.Peak;
-    const home = this.pickBuilding(state, ['hut', 'house'], w.id) ?? h;
+    const home = this.pickBuilding(state, ['hut', 'house', 'manor'], w.id, w.town) ?? h;
 
     if (w.kind === 'child') {
       const base = Math.random() < 0.5 ? home : h;
@@ -125,7 +133,7 @@ export class Actors {
     }
     const job = w.job;
     const goHome = w.returning;
-    const site = (types: string[]) => this.pickBuilding(state, types, w.id);
+    const site = (types: string[]) => this.pickBuilding(state, types, w.id, w.town);
     const near = (b: Building | null, r: number, ok: (t: number, i: number) => boolean) => {
       const base = b ?? h;
       const t = this.randomTileNear(state, base.x, base.y, r, ok);
@@ -155,15 +163,16 @@ export class Actors {
       }
       case 'farmer': {
         const farm = site(['farm']) ?? h;
-        return jitter(farm.x, farm.y + 0.2, 0.45);
+        const [fw, fh] = farm.type === 'farm' ? [2, 2] : [1, 1];
+        return jitter(farm.x + Math.floor(Math.random() * fw), farm.y + Math.floor(Math.random() * fh) - 0.2, 0.45);
       }
       case 'quarrier': {
-        const q = this.pickWorking(state, 'quarry', w.id) ?? h;
+        const q = this.pickWorking(state, 'quarry', w.id, w.town) ?? h;
         if (goHome) return jitter(q.x, q.y + 0.6);
         return near(q, 1, (t) => t === T.Hills || t === T.Mountain || land(t));
       }
       case 'miner': {
-        const m = this.pickWorking(state, 'mine', w.id) ?? h;
+        const m = this.pickWorking(state, 'mine', w.id, w.town) ?? h;
         if (goHome) {
           const s = site(['smithy', 'storehouse']) ?? h;
           return jitter(s.x, s.y + 0.6);
@@ -183,7 +192,7 @@ export class Actors {
           const herb = site(['herbalist']) ?? h;
           return jitter(herb.x, herb.y + 0.6);
         }
-        const hut = this.pickBuilding(state, ['hut', 'house'], Math.floor(Math.random() * 97)) ?? h;
+        const hut = this.pickBuilding(state, ['hut', 'house', 'manor'], Math.floor(Math.random() * 97), w.town) ?? h;
         return jitter(hut.x, hut.y + 0.6);
       }
       case 'scout': {
@@ -204,8 +213,12 @@ export class Actors {
         return jitter(h.x, h.y + 1);
       }
       case 'builder': {
-        const s = state.buildings.find((b) => !b.done);
-        if (s && !goHome) return jitter(s.x, s.y + 0.6, 0.45);
+        const s = state.buildings.find((b) => !b.done && b.town === w.town) ?? state.buildings.find((b) => !b.done);
+        if (s && !goHome) {
+          const tiles = tilesOf(s);
+          const t = tiles[Math.floor(Math.random() * tiles.length)];
+          return jitter(tx(t), ty(t) + 0.6, 0.45);
+        }
         const store = site(['storehouse']) ?? h;
         return jitter(store.x, store.y + 0.8, 0.5);
       }
@@ -217,8 +230,10 @@ export class Actors {
   }
 
   /** A workplace of a type that still has something to dig. */
-  private pickWorking(state: GameState, type: string, seed: number): Building | null {
-    const list = state.buildings.filter((b) => b.done && b.type === type && !b.spent);
+  private pickWorking(state: GameState, type: string, seed: number, town?: number): Building | null {
+    const all = state.buildings.filter((b) => b.done && b.type === type && !b.spent);
+    const own = all.filter((b) => b.town === town);
+    const list = own.length ? own : all;
     return list.length ? list[seed % list.length] : null;
   }
 
@@ -254,14 +269,23 @@ export class Actors {
   }
 
   syncSettlers(state: GameState, stamp: number) {
-    const h = this.hearth(state);
-    const pop = state.settlers;
+    // People of the settlements near the camera; pioneers on the road are drawn as their party.
+    const [fx, fy] = this.focus;
+    const near = new Set(state.towns.filter((t) => Math.hypot(t.x - fx, t.y - fy) < 45).map((t) => t.id));
+    const pop = state.settlers.filter((s) => s.town && near.has(s.town));
     const show = pop.length <= MAX_WALKERS ? pop : pop.filter((s) => hash2(s.id, 1) < MAX_WALKERS / pop.length);
     for (const s of show) {
       let w = this.walkers.get(s.id);
       const kind = this.kindOf(state, s);
+      if (w && w.town !== s.town) {
+        // Moved away: they leave, and appear in their new home.
+        w.leaving = true;
+        this.walkers.delete(s.id);
+        w = undefined;
+      }
       if (!w) {
-        const home = this.pickBuilding(state, ['hut', 'house'], s.id) ?? h;
+        const h = this.hearth(state, s.town);
+        const home = this.pickBuilding(state, ['hut', 'house', 'manor'], s.id, s.town) ?? h;
         w = {
           id: s.id,
           x: home.x + 0.5 + (Math.random() - 0.5) * 0.6,
@@ -283,6 +307,7 @@ export class Actors {
           seen: stamp,
           path: [],
           lane: ((s.id * 0.37) % 1) * 0.5 - 0.25,
+          town: s.town,
         };
         this.walkers.set(s.id, w);
       }
@@ -308,8 +333,10 @@ export class Actors {
     // As many animals as the herds and shoals hold now; hunted-out herds show only a straggler or two.
     const herd = (i: number) => (map.feature[i] === F.Game ? Math.ceil((4 * state.land.life[i]) / max[i]) : state.land.life[i] > max[i] * 0.3 ? 1 : 0);
     const sheep = (b: Building) => Math.max(1, Math.min(4, Math.round(((b.stock ?? 4) / PASTURE_HERD) * 4)));
-    let key = `${state.stats.tilesExplored}:${pastures.map(sheep).join('')}:`;
-    for (const i of landMax(state.seed).lifeTiles) if (state.explored[i] && map.feature[i] !== F.Berries) key += herd(i);
+    const [fx, fy] = this.focus;
+    const close = (i: number) => Math.abs(tx(i) - fx) < 50 && Math.abs(ty(i) - fy) < 40;
+    let key = `${state.stats.tilesExplored}:${Math.round(fx / 20)}:${Math.round(fy / 20)}:${pastures.map(sheep).join('')}:`;
+    for (const i of landMax(state.seed).lifeTiles) if (state.explored[i] && map.feature[i] !== F.Berries && close(i)) key += herd(i);
     if (key === this.animalKey) return;
     this.animalKey = key;
     const keep = this.animals.filter((a) => a.kind === 'bird');
@@ -321,7 +348,7 @@ export class Actors {
       return old.splice(k, 1)[0];
     };
     for (const i of landMax(state.seed).lifeTiles) {
-      if (!state.explored[i]) continue;
+      if (!state.explored[i] || !close(i)) continue;
       const f = map.feature[i];
       if (f !== F.Game && f !== F.Fish) continue;
       for (let k = 0; k < herd(i); k++) {
@@ -329,7 +356,10 @@ export class Actors {
         this.animals.push(reuse(kind, tx(i) + 0.5, ty(i) + 0.5, 1.2) ?? this.spawn(kind, tx(i) + (f === F.Fish ? 0.5 : Math.random()), ty(i) + (f === F.Fish ? 0.5 : Math.random())));
       }
     }
-    for (const p of pastures) for (let k = 0; k < sheep(p); k++) this.animals.push(reuse('sheep', p.x + 0.5, p.y + 0.75, 0.6) ?? this.spawn('sheep', p.x + 0.3 + Math.random() * 0.4, p.y + 0.6 + Math.random() * 0.3));
+    for (const p of pastures) {
+      if (!close(idx(p.x, p.y))) continue;
+      for (let k = 0; k < sheep(p) * 2; k++) this.animals.push(reuse('sheep', p.x + 0.8, p.y + 1.1, 1) ?? this.spawn('sheep', p.x + 0.3 + Math.random() * 1.3, p.y + 0.8 + Math.random() * 0.9));
+    }
   }
 
   private spawn(kind: Animal['kind'], x: number, y: number): Animal {
@@ -411,7 +441,7 @@ export class Actors {
       const d = Math.hypot(dx, dy);
       if (d < 0.05) {
         a.wait = 1 + Math.random() * 5;
-        const r = a.kind === 'sheep' ? 0.35 : 1.6;
+        const r = a.kind === 'sheep' ? 0.6 : 1.6;
         for (let k = 0; k < 8; k++) {
           const nx = a.hx + (Math.random() * 2 - 1) * r;
           const ny = a.hy + (Math.random() * 2 - 1) * r;
@@ -450,14 +480,15 @@ export class Actors {
     this.particles.push({ ...p, max: p.life });
   }
 
-  spawnBirds(w: number, h: number) {
+  /** A flock crossing the view from one side to the other. */
+  spawnBirds(left: number, right: number, y: number) {
     const fromLeft = Math.random() < 0.5;
-    const y = Math.random() * h;
+    const w = right - left;
     const n = 3 + Math.floor(Math.random() * 4);
     for (let k = 0; k < n; k++) {
       this.animals.push({
         kind: 'bird',
-        x: fromLeft ? -2 - k * 0.6 : w + 2 + k * 0.6,
+        x: fromLeft ? left - k * 0.6 : right + k * 0.6,
         y: y + (k % 2 ? 0.5 : -0.3) * k * 0.4,
         tx: 0,
         ty: 0,

@@ -36,6 +36,8 @@ export type BuildingId =
   | 'house'
   | 'shrine'
   | 'bridge'
+  | 'harbour'
+  | 'manor'
   | 'monument';
 
 export type TechId =
@@ -55,6 +57,7 @@ export type TechId =
   | 'writing'
   | 'masonry'
   | 'the_wheel'
+  | 'seafaring'
   | 'era_iron'
   | 'iron'
   | 'medicine'
@@ -78,6 +81,14 @@ export enum T {
   River = 10,
 }
 
+/** Climate of a region: shapes its terrain, colours and what the land yields. */
+export enum Biome {
+  Temperate = 0,
+  Boreal = 1,
+  Arid = 2,
+  Tropical = 3,
+}
+
 export enum F {
   None = 0,
   Berries = 1,
@@ -99,16 +110,27 @@ export interface Settler {
   job: JobId | null;
   /** Female/male — purely for naming and pairing flavour. */
   f: boolean;
+  /** Settlement this person lives in; 0 while on the road with pioneers. */
+  town: number;
 }
 
 export interface Building {
   id: number;
   type: BuildingId;
+  /** Top-left tile of the building's footprint. */
   x: number;
   y: number;
   /** Work points invested. Complete when `done`. */
   progress: number;
   done: boolean;
+  /** Site preparation still to do before construction starts: felling the trees, then levelling the rock. */
+  prep?: number;
+  /** Preparation work the site needed when it was laid out. */
+  prepTotal?: number;
+  /** Settlement the building belongs to. */
+  town?: number;
+  /** Place in the works queue (lower goes first); the order sites were laid out when absent. */
+  order?: number;
   /** Pastures: the size of the herd bred there. */
   stock?: number;
   /** Quarries and mines whose ground has been worked out. */
@@ -125,10 +147,57 @@ export interface Land {
 }
 export type LandLayer = keyof Land;
 
+/** A settlement of the realm, from a pioneers' camp to a metropolis. */
+export interface Settlement {
+  id: number;
+  name: string;
+  /** The hearth's tile. */
+  x: number;
+  y: number;
+  founded: number;
+  /** Highest tier reached: 0 camp, 1 village, 2 town, 3 city, 4 metropolis. */
+  tier: number;
+  /** Settlement whose pioneers founded it (null for the first). */
+  parent: number | null;
+}
+
+/**
+ * People on the move: pioneers blazing a trail to found a new settlement (by land, or by galley across
+ * the sea), or a galley voyage charting unknown coasts.
+ */
+export interface Expedition {
+  id: number;
+  kind: 'settle' | 'voyage';
+  /** Settlement they set out from. */
+  from: number;
+  /** Tiles to pass through, in order, starting where they set out. */
+  path: number[];
+  /** Index into `path` of the tile they are on, and how far they are toward the next (0..1). */
+  at: number;
+  step: number;
+  /** Settlers travelling (pioneers only). */
+  people: number[];
+  started: number;
+}
+
+/** A trade route between two settlements, by land along a trail or road, or by galley over the sea. */
+export interface TradeRoute {
+  id: number;
+  a: number;
+  b: number;
+  kind: 'land' | 'sea';
+  path: number[];
+  opened: number;
+  /** Land routes: how many tiles of the trail have been paved into road so far. */
+  paved: number;
+  /** Work put into paving the next tile. */
+  work?: number;
+}
+
 export interface LogEntry {
   day: number;
   text: string;
-  kind: 'info' | 'good' | 'bad' | 'birth' | 'death' | 'discovery' | 'era' | 'build';
+  kind: 'info' | 'good' | 'bad' | 'birth' | 'death' | 'discovery' | 'era' | 'build' | 'realm';
 }
 
 export interface Modifier {
@@ -211,8 +280,19 @@ export interface GameState {
   hunger: number;
   cold: number;
   land: Land;
-  /** Tiles that carry a road (the village green around the hearth is implicit). */
+  /** Tiles that carry a road (the village green around each hearth is implicit). */
   roads: number[];
+  /** Rough trails blazed by pioneers: walkable through forest, over mountain passes and across fords. */
+  trails: number[];
+  /** Rocky tiles levelled for building. */
+  graded: number[];
+  /** The realm's settlements; the first is the capital. */
+  towns: Settlement[];
+  nextTownId: number;
+  expeditions: Expedition[];
+  nextExpId: number;
+  routes: TradeRoute[];
+  nextRouteId: number;
   /** Bumped whenever the land changes in a way that affects building rules or slots. */
   landEpoch: number;
   /** Smoothed share of the full output each job actually achieved, given what the land had left. */
@@ -233,4 +313,7 @@ export type FxEvent =
   | { kind: 'built'; building: number }
   | { kind: 'discover'; tile: number }
   | { kind: 'era'; era: number }
-  | { kind: 'arrive'; count: number };
+  | { kind: 'arrive'; count: number }
+  | { kind: 'found'; town: number }
+  | { kind: 'tier'; town: number; tier: number }
+  | { kind: 'route'; route: number };
