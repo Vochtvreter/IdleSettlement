@@ -1104,7 +1104,8 @@ button {
 #modal-root {
   position: absolute;
   inset: 0;
-  z-index: 50;
+  /* Above the title screen (60) so its How to Play dialog is reachable. */
+  z-index: 70;
   pointer-events: none;
 }
 .modal-back {
