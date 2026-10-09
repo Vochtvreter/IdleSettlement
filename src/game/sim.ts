@@ -10,14 +10,14 @@ import {
 } from './data';
 import { census, derived, invalidate, jobUnlocked } from './derived';
 import { worksQueue } from './actions';
-import { centerOf, drawFrom, fellLeft, growLand, landFrac, landMax, prepareSite } from './land';
+import { centerOf, drawFrom, fellLeft, growLand, Heap, landFrac, landMax, prepareSite } from './land';
 import { loseTraveller, paveRoutes, realmDay, setRevealHook, townWithRoom, tradeKnowledge, tradeMorale } from './realm';
 import { runCouncil } from './council';
 import { fxAdd, fxMul } from './decisions';
 import { resolveChoice, rollEvent } from './events';
 import { getMap, idx, inBounds, N4, tx, ty } from './map';
 import { checkObjectives } from './objectives';
-import { Rng } from './rng';
+import { hash2, Rng } from './rng';
 import { ageOf, eraOf, hasTech, makeSettler, seasonIndex } from './state';
 import type { BuildingId, FxEvent, GameState, JobId, LandLayer, LogEntry, Rates, ResourceId, Settler } from './types';
 import { F, JOBS, RESOURCES } from './types';
@@ -640,7 +640,16 @@ export function addSettlers(state: GameState, ctx: TickContext, rng: Rng, n: num
 
 // ---------------------------------------------------------------- exploration
 
-const frontierMemo = new WeakMap<GameState, { n: number; set: Set<number> }>();
+interface FrontierMemo {
+  n: number;
+  set: Set<number>;
+  /** Frontier tiles by how close they are to where scouts are heading (lazily cleaned). */
+  heap: Heap | null;
+  anchors: number[][];
+  anchorKey: string;
+}
+
+const frontierMemo = new WeakMap<GameState, FrontierMemo>();
 
 /** Unexplored tiles next to explored ones, kept up to date as tiles are revealed. */
 export function frontier(state: GameState): Set<number> {
@@ -660,9 +669,16 @@ export function frontier(state: GameState): Set<number> {
         }
       }
     }
-  m = { n: state.stats.tilesExplored, set };
+  m = { n: state.stats.tilesExplored, set, heap: null, anchors: [], anchorKey: '' };
   frontierMemo.set(state, m);
   return set;
+}
+
+/** How attractive a frontier tile is to scouts (lower is better): near a marked spot, or any hearth. */
+function frontierScore(m: FrontierMemo, i: number) {
+  let dmin = Infinity;
+  for (const [ax, ay] of m.anchors) dmin = Math.min(dmin, Math.hypot(tx(i) - ax, ty(i) - ay));
+  return dmin + hash2(tx(i), ty(i), 77) * 2.5;
 }
 
 function frontierReveal(state: GameState, i: number) {
@@ -672,33 +688,37 @@ function frontierReveal(state: GameState, i: number) {
   m.set.delete(i);
   const x = tx(i);
   const y = ty(i);
-  for (const [dx, dy] of N4) if (inBounds(x + dx, y + dy) && !state.explored[idx(x + dx, y + dy)]) m.set.add(idx(x + dx, y + dy));
+  for (const [dx, dy] of N4) {
+    if (!inBounds(x + dx, y + dy)) continue;
+    const j = idx(x + dx, y + dy);
+    if (state.explored[j] || m.set.has(j)) continue;
+    m.set.add(j);
+    m.heap?.push(j, frontierScore(m, j));
+  }
 }
 
-/** Where scouts head when no land is marked: the unknown nearest any of the realm's hearths. */
-function nextExploreTile(state: GameState, rng: Rng): number | null {
+/** Where scouts head next: the unknown nearest the marked land, or nearest any of the realm's hearths. */
+function nextExploreTile(state: GameState): number | null {
   const f = frontier(state);
   if (!f.size) return null;
+  const m = frontierMemo.get(state)!;
   const anchors = state.exploreTarget !== null ? [[tx(state.exploreTarget), ty(state.exploreTarget)]] : state.towns.map((t) => [t.x, t.y]);
-  let best = -1;
-  let bestScore = Infinity;
-  for (const i of f) {
-    let dmin = Infinity;
-    for (const [ax, ay] of anchors) dmin = Math.min(dmin, Math.hypot(tx(i) - ax, ty(i) - ay));
-    const score = dmin + rng.next() * 2.5;
-    if (score < bestScore) {
-      bestScore = score;
-      best = i;
-    }
+  const key = anchors.map((a) => a.join(',')).join(';');
+  if (!m.heap || key !== m.anchorKey) {
+    m.anchors = anchors;
+    m.anchorKey = key;
+    m.heap = new Heap();
+    for (const i of f) m.heap.push(i, frontierScore(m, i));
   }
-  return best;
+  while (m.heap.size && !f.has(m.heap.peek())) m.heap.pop();
+  return m.heap.size ? m.heap.peek() : null;
 }
 
 function explore(state: GameState, ctx: TickContext, rng: Rng, pts: number) {
   const map = getMap(state.seed);
   state.exploreProgress += pts;
   for (let guard = 0; guard < 20; guard++) {
-    const next = nextExploreTile(state, rng);
+    const next = nextExploreTile(state);
     if (next === null) {
       state.exploreProgress = 0;
       return;

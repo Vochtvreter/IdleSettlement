@@ -550,6 +550,10 @@ export class Heap {
   get size() {
     return this.a.length;
   }
+  /** The item that would be popped next. */
+  peek(): number {
+    return this.a[0];
+  }
   push(v: number, pri: number) {
     const a = this.a;
     const p = this.p;

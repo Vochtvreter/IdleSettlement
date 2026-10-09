@@ -123,6 +123,7 @@ export class UI {
       document.getElementById('app')!.classList.toggle('sheet-collapsed', c);
       toggle.innerHTML = c ? '&#9664;' : '&#9654;';
       document.getElementById('zoom-ctl')!.classList.toggle('wide', c);
+      document.getElementById('minimap')!.classList.toggle('wide', c);
     });
     // Mobile: tapping the tab bar of a collapsed sheet expands it.
     document.getElementById('tabs')!.addEventListener('click', () => {
