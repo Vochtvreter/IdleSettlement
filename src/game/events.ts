@@ -1,4 +1,5 @@
 import { BUILDING_DEFS } from './data';
+import { fxMul } from './decisions';
 import { canAfford, derived, pay, refund } from './derived';
 import { Rng } from './rng';
 import { ageOf, eraOf, hasTech, seasonIndex } from './state';
@@ -31,7 +32,7 @@ const EVENTS: EventDef[] = [
   {
     id: 'wanderers',
     benign: true,
-    weight: (s) => (s.morale > 45 && freeHousing(s) >= 2 ? 3 : 0),
+    weight: (s) => (s.morale > 45 && freeHousing(s) >= 2 ? 3 * fxMul(s, 'immigration') : 0),
     run: (s, ctx, rng) => {
       const n = Math.min(freeHousing(s), rng.int(1, 3));
       addSettlers(s, ctx, rng, n);
@@ -92,7 +93,7 @@ const EVENTS: EventDef[] = [
       const lostFood = Math.round(s.res.food * rng.range(0.1, 0.2));
       s.res.food -= lostFood;
       const hunters = s.settlers.filter((x) => x.job === 'hunter' || x.job === 'gatherer');
-      if (towers(s) === 0 && hunters.length && s.settlers.length >= 12 && rng.chance(0.25)) {
+      if (towers(s) === 0 && hunters.length && s.settlers.length >= 12 && rng.chance(0.25 / fxMul(s, 'defense'))) {
         const v = rng.pick(hunters);
         killSettler(s, ctx, v, 'a wolf attack');
       }
@@ -109,11 +110,11 @@ const EVENTS: EventDef[] = [
   },
   {
     id: 'sickness',
-    weight: (s) => (s.settlers.length >= 16 && !hasMod(s, 'sickness') ? 1 : 0),
+    weight: (s) => (s.settlers.length >= 16 && !hasMod(s, 'sickness') ? fxMul(s, 'disease') : 0),
     run: (s, ctx, rng) => {
       const healers = s.settlers.filter((x) => x.job === 'healer').length;
       const care = Math.min(1, (healers * 12) / s.settlers.length);
-      const deaths = Math.max(0, Math.round(rng.range(1, 3.5) * (1 - care * 0.8) * (hasTech(s, 'medicine') ? 0.5 : 1)));
+      const deaths = Math.max(0, Math.round(rng.range(1, 3.5) * (1 - care * 0.8) * (hasTech(s, 'medicine') ? 0.5 : 1) * Math.min(1.5, fxMul(s, 'disease'))));
       addMod(s, { id: 'sickness', label: 'Fever', effects: { morale: -10 } }, 12);
       const vulnerable = [...s.settlers].sort((a, b) => Math.abs(ageOf(s, b) - 30) - Math.abs(ageOf(s, a) - 30));
       for (let k = 0; k < deaths && vulnerable.length; k++) killSettler(s, ctx, vulnerable.shift()!, 'fever');
@@ -142,7 +143,7 @@ const EVENTS: EventDef[] = [
   // ---- choices
   {
     id: 'trader',
-    weight: (s) => (eraOf(s) >= 1 && !s.choice ? 1.6 : 0),
+    weight: (s) => (eraOf(s) >= 1 && !s.choice ? 1.6 * fxMul(s, 'trade') : 0),
     run: (s, _ctx, rng) => {
       const era = eraOf(s);
       const offers: ChoiceOption[] =
@@ -156,6 +157,7 @@ const EVENTS: EventDef[] = [
               { label: 'Trade food for tools', key: 'trade', cost: { food: 90 }, gain: { tools: 14 } },
               { label: 'Trade stone for knowledge', key: 'trade', cost: { stone: 80 }, gain: { knowledge: 40 + era * 15 } },
             ];
+      if (fxMul(s, 'trade') > 1) for (const o of offers) o.gain = Object.fromEntries(Object.entries(o.gain!).map(([k, v]) => [k, Math.round((v ?? 0) * 1.3)]));
       const picks = era <= 1 ? offers : [offers.splice(rng.int(0, offers.length - 1), 1)[0], offers[rng.int(0, offers.length - 1)]];
       s.choice = {
         id: 'trader',
@@ -168,7 +170,7 @@ const EVENTS: EventDef[] = [
   },
   {
     id: 'refugees',
-    weight: (s) => (!s.choice && s.settlers.length >= 8 ? 0.9 : 0),
+    weight: (s) => (!s.choice && s.settlers.length >= 8 ? 0.9 * Math.min(1, fxMul(s, 'immigration') + 0.2) : 0),
     run: (s, _ctx, rng) => {
       const n = rng.int(3, 5);
       s.choice = {
@@ -268,7 +270,7 @@ export function resolveChoice(state: GameState, ctx: TickContext, index: number)
       break;
     case 'fight': {
       const defenders = state.settlers.filter((x) => ageOf(state, x) >= 16 && ageOf(state, x) < 50);
-      const strength = 0.45 + towers(state) * 0.12 + (hasTech(state, 'iron') ? 0.15 : 0) + (state.res.tools > 20 ? 0.1 : 0);
+      const strength = (0.45 + towers(state) * 0.12 + (hasTech(state, 'iron') ? 0.15 : 0) + (state.res.tools > 20 ? 0.1 : 0)) * fxMul(state, 'defense');
       if (rng.chance(Math.min(0.92, strength))) {
         const loot = 10 + eraOf(state) * 5;
         refund(state, { hides: loot, ore: loot });

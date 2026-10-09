@@ -14,7 +14,10 @@ import {
 } from '../game/data';
 import { derived, jobUnlocked } from '../game/derived';
 import { ageOf, eraOf, seasonIndex, year } from '../game/state';
-import { careLevel, gathererCapacity, materialLimit, moraleTarget, popSummary, productivity, toolBonus } from '../game/sim';
+import { buildMaterials, buildWork, careLevel, gathererCapacity, materialLimit, moraleTarget, popSummary, productivity, toolBonus } from '../game/sim';
+import { councilWish } from '../game/council';
+import { PIN_UNLOCK } from '../game/decisions';
+import { buildDecide, decideSignature, pendingDecision } from './decide';
 import type { BuildingId, GameState, JobId, LogEntry, ResourceId, TechId } from '../game/types';
 import { JOBS } from '../game/types';
 import { sfx } from './audio';
@@ -37,7 +40,7 @@ export const JOB_ICON: Record<JobId, string> = {
 
 export const BUILDING_ICON = (state: GameState, t: BuildingId) => (t === 'hut' ? (eraOf(state) >= 2 ? 'hut1' : 'hut0') : t === 'monument' ? 'shrine' : t);
 
-type Tab = 'people' | 'build' | 'research' | 'log';
+type Tab = 'decide' | 'people' | 'build' | 'research' | 'log';
 type Updater = () => void;
 
 const JOB_SOURCE: Partial<Record<JobId, [ResourceId, string][]>> = {
@@ -63,19 +66,19 @@ export function dateLabel(day: number) {
 }
 
 export class Panels {
-  tab: Tab = 'people';
+  tab: Tab = 'decide';
   private body: HTMLElement;
   private tabsEl: HTMLElement;
   private sig = '';
   private updaters: Updater[] = [];
   private logFilter: 'all' | 'life' | 'discovery' | 'events' = 'all';
   private badges: Partial<Record<Tab, HTMLElement>> = {};
-  private seenTechs = -1;
 
   constructor(private game: Game) {
     this.body = document.getElementById('tab-body')!;
     this.tabsEl = document.getElementById('tabs')!;
     const tabs: [Tab, string, string][] = [
+      ['decide', 'Decide', 'i_flag'],
       ['people', 'People', 'i_people'],
       ['build', 'Build', 'i_hammer'],
       ['research', 'Research', 'i_knowledge'],
@@ -123,6 +126,9 @@ export class Panels {
       this.body.replaceChildren();
       this.updaters = [];
       switch (this.tab) {
+        case 'decide':
+          buildDecide(this.game, this.body, this.updaters);
+          break;
         case 'people':
           this.buildPeople(s);
           break;
@@ -142,25 +148,29 @@ export class Panels {
   }
 
   private updateBadges(s: GameState) {
-    const ready = TECH_ORDER.filter((t) => techStatus(s, t).ok).length;
+    const ready = s.council.research ? 0 : TECH_ORDER.filter((t) => !t.startsWith('era_') && techStatus(s, t).ok).length;
     const rb = this.badges.research!;
     rb.textContent = String(ready);
     rb.classList.toggle('hidden', ready === 0 || this.tab === 'research');
-    const idle = popSummary(s).idle;
+    const idle = s.council.jobs ? 0 : popSummary(s).idle;
     const pb = this.badges.people!;
     pb.textContent = String(idle);
     pb.classList.toggle('hidden', idle === 0 || this.tab === 'people');
-    if (this.seenTechs < 0) this.seenTechs = s.techs.length;
+    const db = this.badges.decide!;
+    db.textContent = '!';
+    db.classList.toggle('hidden', !pendingDecision(s) || this.tab === 'decide');
   }
 
   private signature(s: GameState): string {
     switch (this.tab) {
+      case 'decide':
+        return decideSignature(s);
       case 'people':
-        return `p:${JOBS.filter((j) => jobUnlocked(s, j)).join(',')}:${s.settlers.length > 0}`;
+        return `p:${JOBS.filter((j) => jobUnlocked(s, j)).join(',')}:${s.settlers.length > 0}:${s.council.jobs}`;
       case 'build':
-        return `b:${s.techs.length}:${eraOf(s)}:${s.buildings.filter((b) => !b.done).map((b) => b.id).join(',')}:${this.game.view.placing}`;
+        return `b:${s.techs.length}:${eraOf(s)}:${s.buildings.filter((b) => !b.done).map((b) => b.id).join(',')}:${this.game.view.placing}:${s.council.build}`;
       case 'research':
-        return `r:${s.techs.length}:${eraOf(s)}`;
+        return `r:${s.techs.length}:${eraOf(s)}:${s.council.research}:${s.pin}:${s.objective > PIN_UNLOCK}`;
       case 'log':
         return `l:${s.log.length}:${s.log[s.log.length - 1]?.day}:${this.logFilter}`;
     }
@@ -191,7 +201,10 @@ export class Panels {
     b.append(grid);
 
     const idleNote = h('div', { class: 'idle-note hidden' });
-    b.append(h('div', { class: 'section-title' }, 'Work'), idleNote);
+    const manual = !s.council.jobs;
+    b.append(h('div', { class: 'section-title' }, 'Work'));
+    if (!manual) b.append(h('div', { class: 'council-note' }, 'The council assigns work each day following your focus and policies. ', h('button', { class: 'link-btn', onclick: () => this.setTab('decide') }, 'Change direction →')));
+    b.append(idleNote);
 
     const jobsWrap = h('div');
     b.append(jobsWrap);
@@ -217,7 +230,7 @@ export class Panels {
         { class: 'job', style: `--jc:${def.color}` },
         img(JOB_ICON[j], 2),
         tip(h('div', null, h('div', { class: 'name' }, def.plural), sub), () => this.jobTip(j)),
-        h('div', { class: 'ctl' }, minus, count, plus),
+        manual ? h('div', { class: 'ctl' }, minus, count, plus) : h('div', { class: 'ctl' }, count),
       );
       jobsWrap.append(row);
       this.updaters.push(() => {
@@ -255,7 +268,7 @@ export class Panels {
       kids.v.textContent = String(ps.children);
       elders.v.textContent = String(ps.elders);
       gen.v.textContent = String(g.stats.maxGen);
-      if (ps.idle > 0) {
+      if (ps.idle > 0 && !g.council.jobs) {
         idleNote.classList.remove('hidden');
         idleNote.textContent = `${ps.idle} adult${ps.idle > 1 ? 's are' : ' is'} idle — they forage a little and help builders. Assign them with +.`;
       } else idleNote.classList.add('hidden');
@@ -339,7 +352,7 @@ export class Panels {
         b.append(row);
         this.updaters.push(() => {
           const g = this.game.state;
-          const p = site.progress / def.work;
+          const p = site.progress / buildWork(g, site.type);
           bar.style.width = `${Math.min(100, p * 100)}%`;
           const builders = popSummary(g).jobs.builder;
           const stalled = def.materials && materialLimit(g, site.type) < 0.01;
@@ -350,8 +363,15 @@ export class Panels {
       }
     }
 
-    b.append(h('div', { class: 'section-title' }, 'Buildings'));
-    b.append(h('div', { style: 'font-size:12px;color:var(--muted);margin:-2px 0 8px' }, 'Pick a building, then click a highlighted tile inside your territory. Gold tiles give adjacency bonuses.'));
+    b.append(h('div', { class: 'section-title' }, s.council.build ? 'Commission a building' : 'Buildings'));
+    if (s.council.build) {
+      const wish = h('div', { class: 'council-note' });
+      b.append(wish);
+      this.updaters.push(() => {
+        const w = councilWish(this.game.state);
+        wish.textContent = `The council builds on its own${w ? ` — next up: ${BUILDING_DEFS[w.type].name}${w.waiting ? ' (gathering materials)' : ''}` : ''}. You can also commission any building yourself: pick one, then click a glowing tile.`;
+      });
+    } else b.append(h('div', { style: 'font-size:12px;color:var(--muted);margin:-2px 0 8px' }, 'Pick a building, then click a highlighted tile inside your territory. Gold tiles give adjacency bonuses.'));
     const cards = h('div', { class: 'cards' });
     b.append(cards);
     for (const t of BUILD_ORDER) {
@@ -372,8 +392,8 @@ export class Panels {
       );
       tip(card, () => {
         const g = this.game.state;
-        const extra = def.materials ? `<div class="sep"></div>As it rises it consumes: ${Object.entries(def.materials).map(([k, v]) => `${fmt(v ?? 0)} ${k}`).join(', ')}.` : '';
-        return `<h4>${def.name}</h4>${def.desc}${def.hint ? `<div class="sep"></div><span class="muted">${def.hint}</span>` : ''}${extra}${!unlocked ? `<div class="sep"></div><span style="color:var(--bad)">Requires ${TECH_DEFS[def.tech!].name}</span>` : ''}<div class="sep"></div><span class="muted">Work: ${def.work} · Built: ${derived(g).counts[t] ?? 0}</span>`;
+        const extra = def.materials ? `<div class="sep"></div>As it rises it consumes: ${Object.entries(buildMaterials(g, t)!).map(([k, v]) => `${fmt(v ?? 0)} ${k}`).join(', ')}.` : '';
+        return `<h4>${def.name}</h4>${def.desc}${def.hint ? `<div class="sep"></div><span class="muted">${def.hint}</span>` : ''}${extra}${!unlocked ? `<div class="sep"></div><span style="color:var(--bad)">Requires ${TECH_DEFS[def.tech!].name}</span>` : ''}<div class="sep"></div><span class="muted">Work: ${buildWork(g, t)} · Built: ${derived(g).counts[t] ?? 0}</span>`;
       });
       card.addEventListener('click', () => {
         if (!unlocked) return;
@@ -409,21 +429,32 @@ export class Panels {
       const rate = Object.values(this.game.rates.prod.knowledge).reduce((a, x) => a + x, 0);
       kn.replaceChildren(img('i_knowledge', 2), h('span', null, `${fmt(g.res.knowledge)} knowledge`), h('span', { style: 'color:var(--good);font-family:var(--mono);font-size:10px' }, `${fmtRate(rate)}/day`));
     });
+    const canPin = s.objective > PIN_UNLOCK;
+    if (s.council.research) {
+      b.append(
+        h(
+          'div',
+          { class: 'council-note' },
+          canPin
+            ? 'The council researches on its own, following your focus. Mark a discovery as next to have it save knowledge for that one first.'
+            : 'The council researches on its own, following your focus. (Choosing the next discovery yourself unlocks with your first discovery.)',
+        ),
+      );
+    }
     for (let e = Math.min(4, era + 1); e >= 0; e--) {
       const future = e > era;
-      const techs = TECH_ORDER.filter((t) => TECH_DEFS[t].era === e);
+      const techs = TECH_ORDER.filter((t) => TECH_DEFS[t].era === e && TECH_DEFS[t].advancesTo === undefined);
       const allDone = techs.every((t) => s.techs.includes(t));
       if (allDone && !future) {
         b.append(h('div', { class: 'era-head future' }, h('div', { class: 'n' }, `\u2714 ${ERAS[e].name}`), h('div', { class: 'b' }, `All ${techs.length} discoveries made.`)));
         continue;
       }
-      b.append(h('div', { class: 'era-head' + (future ? ' future' : '') }, h('div', { class: 'n' }, (future ? '\u{1F512} ' : '') + ERAS[e].name), h('div', { class: 'b' }, future ? 'Advance your era to unlock these discoveries.' : ERAS[e].blurb)));
+      b.append(h('div', { class: 'era-head' + (future ? ' future' : '') }, h('div', { class: 'n' }, (future ? '\u{1F512} ' : '') + ERAS[e].name), h('div', { class: 'b' }, future ? 'Choose the next path in the Decide tab to reach this age.' : ERAS[e].blurb)));
       if (future) {
         b.append(h('div', { style: 'font-size:12px;color:var(--dim);margin:0 4px 8px' }, techs.map((t) => TECH_DEFS[t].name).join(' \u00b7 ')));
         continue;
       }
-      // Unknown discoveries first (era advance last among them), known ones at the bottom.
-      const rank = (t: TechId) => (s.techs.includes(t) ? 2 : TECH_DEFS[t].advancesTo !== undefined ? 1 : 0);
+      const rank = (t: TechId) => (s.techs.includes(t) ? 2 : s.pin === t ? -1 : 0);
       techs.sort((a, c) => rank(a) - rank(c));
       for (const t of techs) b.append(this.techCard(t));
     }
@@ -433,12 +464,17 @@ export class Panels {
     const def = TECH_DEFS[t];
     const s = this.game.state;
     const known = s.techs.includes(t);
+    const auto = s.council.research;
+    const pinned = s.pin === t;
     const why = h('div', { class: 'why' });
-    const btn = h('button', { class: 'btn small ' + (def.advancesTo !== undefined ? 'primary' : 'good') }, def.advancesTo !== undefined ? 'Advance' : 'Discover');
+    const canPin = s.objective > PIN_UNLOCK;
+    const btn = auto
+      ? h('button', { class: 'btn small ' + (pinned ? 'primary' : ''), disabled: !canPin, title: canPin ? '' : 'Unlocks with your first discovery' }, pinned ? 'Next \u2714' : 'Make next')
+      : h('button', { class: 'btn small good' }, 'Discover');
     const costBox = h('div', { style: 'grid-column:1/-1' });
     const card = h(
       'div',
-      { class: 'tech' + (known ? ' done' : '') + (def.advancesTo !== undefined ? ' era' : '') },
+      { class: 'tech' + (known ? ' done' : '') + (pinned ? ' era' : '') },
       h('div', { class: 'tn' }, def.name),
       known ? h('span') : btn,
       h('div', { class: 'td' }, def.desc),
@@ -447,24 +483,29 @@ export class Panels {
     );
     if (!known) {
       btn.addEventListener('click', () => {
-        const fx = this.game.tickCtx().fx;
-        const r = research(this.game.state, t, fx);
+        const g = this.game.state;
+        if (auto) {
+          g.pin = g.pin === t ? null : t;
+          sfx('click');
+          this.game.changed();
+          return;
+        }
+        const r = research(g, t, this.game.tickCtx().fx);
         if (r.ok) {
-          sfx(def.advancesTo !== undefined ? 'era' : 'research');
+          sfx('research');
           this.game.changed();
         } else sfx('error');
       });
       this.updaters.push(() => {
         const g = this.game.state;
         const st = techStatus(g, t);
-        btn.disabled = !st.ok;
+        if (!auto) btn.disabled = !st.ok;
         card.classList.toggle('ready', st.ok);
         costBox.replaceChildren(costEl(g, def.cost));
         const reasons: string[] = [];
-        if (def.minPop && g.settlers.length < def.minPop) reasons.push(`Needs ${def.minPop} people (${g.settlers.length})`);
         const missing = (def.requires ?? []).filter((r) => !g.techs.includes(r));
         if (missing.length) reasons.push(`Needs ${missing.map((m) => TECH_DEFS[m].name).join(', ')}`);
-        why.textContent = reasons.join(' · ');
+        why.textContent = reasons.join(' \u00b7 ');
       });
     }
     return card;

@@ -9,7 +9,6 @@ import {
   JOB_DEFS,
   MAP_H,
   MAP_W,
-  OBJECTIVES,
   RESOURCE_DEFS,
   SEASONS,
   TECH_DEFS,
@@ -21,7 +20,9 @@ import { getMap, tx, ty } from '../game/map';
 import { objectiveProgress } from '../game/objectives';
 import { exportSave, importSave, type OfflineReport } from '../game/save';
 import { dayOfSeason, eraOf, hasTech, seasonIndex, year } from '../game/state';
-import { materialLimit, popSummary } from '../game/sim';
+import { buildWork, materialLimit, popSummary } from '../game/sim';
+import { MILESTONES, milestoneUnlocks } from '../game/decisions';
+import { pendingDecision } from './decide';
 import type { BuildingId, FxEvent, GameState, LogEntry, ResourceId } from '../game/types';
 import { F, RESOURCES } from '../game/types';
 import { sfx, setSoundEnabled, soundEnabled } from './audio';
@@ -61,7 +62,7 @@ export class UI {
     this.inspectTile = null;
     this.choiceSig = '';
     this.buildResources();
-    this.panels.setTab('people');
+    this.panels.setTab('decide');
     this.update(true);
   }
 
@@ -199,7 +200,7 @@ export class UI {
 
   handleFx(fx: FxEvent[]) {
     for (const f of fx) {
-      if (f.kind === 'era') this.eraModal(f.era);
+      if (f.kind === 'era') this.eraBanner(f.era);
     }
   }
 
@@ -213,22 +214,37 @@ export class UI {
         void el.offsetWidth;
         el.classList.add('complete');
         sfx('discover');
+        const unlocks = milestoneUnlocks(this.objectiveIdx);
+        if (unlocks.length) this.toast(`Unlocked: ${unlocks.join(', ')}. See the Decide tab.`, 'discovery', 'i_flag', 6000);
       }
       this.objectiveIdx = i;
     }
-    if (i >= OBJECTIVES.length) {
-      el.replaceChildren(...[h('div', { class: 'lbl' }, h('span', null, 'SAGA COMPLETE'), h('span', null, '★')), h('div', { class: 'txt' }, 'The Sunspire stands.'), h('div', { class: 'hint' }, 'Your legacy is secure. Keep growing, or begin a new saga from the menu.'), this.modsEl(s)].filter((x): x is HTMLDivElement => !!x));
+    const pending = pendingDecision(s);
+    const cta = pending
+      ? h(
+          'button',
+          { class: 'cta', onclick: () => this.panels.setTab('decide') },
+          img('i_flag', 1),
+          pending.tech ? `Ready: ${pending.name}` : `Decide: ${pending.name}`,
+        )
+      : null;
+    if (i >= MILESTONES.length) {
+      el.replaceChildren(...[h('div', { class: 'lbl' }, h('span', null, 'SAGA COMPLETE'), h('span', null, '\u2605')), h('div', { class: 'txt' }, 'The Sunspire stands.'), h('div', { class: 'hint' }, 'Your legacy is secure. Keep growing, or begin a new saga from the menu.'), this.modsEl(s)].filter((x): x is HTMLDivElement => !!x));
       return;
     }
-    const def = OBJECTIVES[i];
+    const def = MILESTONES[i];
     const [cur, goal] = objectiveProgress(s, i);
+    const unlocks = milestoneUnlocks(i);
     el.replaceChildren(
-      ...[h('div', { class: 'lbl' }, h('span', null, `GOAL ${i + 1} / ${OBJECTIVES.length}`), h('span', null, goal > 1 ? `${Math.min(cur, goal)} / ${goal}` : '')),
-      h('div', { class: 'txt' }, def.text),
-      h('div', { class: 'hint' }, def.hint),
-      h('div', { class: 'meter' }, h('i', { style: `width:${Math.min(100, (cur / goal) * 100)}%` })),
-      def.reward ? h('div', { class: 'reward' }, 'Reward:', costEl({ ...s, res: { ...s.res, ...Object.fromEntries(RESOURCES.map((r) => [r, Infinity])) } }, def.reward)) : null,
-      this.modsEl(s)].filter((x): x is HTMLDivElement => !!x),
+      ...[
+        h('div', { class: 'lbl' }, h('span', null, `MILESTONE ${i + 1} / ${MILESTONES.length}`), h('span', null, goal > 1 && i !== 0 ? `${Math.min(cur, goal)} / ${goal}` : '')),
+        h('div', { class: 'txt' }, def.text),
+        h('div', { class: 'hint' }, def.hint),
+        h('div', { class: 'meter' }, h('i', { style: `width:${Math.min(100, (cur / goal) * 100)}%` })),
+        unlocks.length ? h('div', { class: 'reward' }, `Unlocks: ${unlocks.join(', ')}`) : null,
+        cta,
+        this.modsEl(s),
+      ].filter((x): x is HTMLDivElement => !!x),
     );
   }
 
@@ -321,7 +337,7 @@ export class UI {
       parts.push(h('div', { class: 'desc' }, s.exploreTarget === tile ? 'Your scouts are heading this way.' : 'Click to send your scouts toward this land. Assign Scouts in the People tab.'));
     } else if (b) {
       const def = BUILDING_DEFS[b.type];
-      const p = b.done ? 1 : b.progress / def.work;
+      const p = b.done ? 1 : b.progress / buildWork(s, b.type);
       parts.push(h('div', { class: 'ih' }, img(BUILDING_ICON(s, b.type), 3), h('div', null, h('div', { class: 'tt' }, def.name), h('div', { class: 'ts' }, b.done ? TERRAIN_NAMES[map.terrain[tile]] : `Under construction · ${Math.round(p * 100)}%`))));
       parts.push(h('div', { class: 'desc' }, def.desc));
       if (def.housing) parts.push(h('div', { class: 'row' }, 'Housing', h('b', null, String(def.housing))));
@@ -500,23 +516,27 @@ export class UI {
     while (this.closeTopModal());
   }
 
-  eraModal(era: number) {
-    const s = this.game.state;
+  /** Celebrate a new age without stopping the game. */
+  eraBanner(era: number) {
     const e = ERAS[era];
-    const techs = TECH_ORDER.filter((t) => TECH_DEFS[t].era === era).map((t) => TECH_DEFS[t].name);
+    const s = this.game.state;
+    const techs = TECH_ORDER.filter((t) => TECH_DEFS[t].era === era && TECH_DEFS[t].advancesTo === undefined).map((t) => TECH_DEFS[t].name);
     const buildings = (Object.keys(BUILDING_DEFS) as BuildingId[]).filter((b) => BUILDING_DEFS[b].tech && TECH_DEFS[BUILDING_DEFS[b].tech!].era === era).map((b) => BUILDING_DEFS[b].name);
-    let close = () => {};
-    const btn = h('button', { class: 'btn primary', onclick: () => close() }, 'Onward');
-    close = this.openModal([
-      h('div', { class: 'kicker' }, `Year ${year(s.day)} · A new age dawns`),
-      h('h2', null, e.name),
-      h('p', null, e.blurb),
-      h('div', { class: 'section-title' }, 'New discoveries await'),
-      h('div', { class: 'unlocks' }, ...techs.map((t) => h('span', null, t))),
-      buildings.length ? h('div', { class: 'section-title', style: 'margin-top:12px' }, 'Buildings within reach') : null,
-      buildings.length ? h('div', { class: 'unlocks' }, ...buildings.map((t) => h('span', null, t))) : null,
-      h('div', { class: 'acts' }, btn),
-    ]);
+    document.querySelector('.era-banner')?.remove();
+    const banner = h(
+      'div',
+      { class: 'era-banner panel' },
+      h('div', { class: 'kicker' }, `Year ${year(s.day)} \u00b7 A new age dawns`),
+      h('div', { class: 'en' }, e.name),
+      h('div', { class: 'eb' }, e.blurb),
+      h('div', { class: 'unlocks' }, ...[...techs, ...buildings].map((t) => h('span', null, t))),
+    );
+    banner.addEventListener('click', () => banner.remove());
+    document.getElementById('app')!.append(banner);
+    setTimeout(() => {
+      banner.classList.add('out');
+      setTimeout(() => banner.remove(), 600);
+    }, 7000);
     sfx('era');
   }
 
@@ -547,7 +567,7 @@ export class UI {
         h('div', { class: 'hero' }, h('img', { src: './favicon.svg', class: 'pix', style: 'width:96px;height:96px;filter:drop-shadow(0 0 20px rgba(255,200,80,.7))' })),
         h('div', { class: 'kicker', style: 'text-align:center' }, 'Victory'),
         h('h2', { style: 'text-align:center' }, 'The Sunspire Stands'),
-        h('p', { style: 'text-align:center' }, `From seven wanderers around a fire, the people of ${s.name} have raised a wonder that will outlast the ages. Their story will be told for a thousand years.`),
+        h('p', { style: 'text-align:center' }, `From eight wanderers around a fire, the people of ${s.name} have raised a wonder that will outlast the ages. Their story will be told for a thousand years.`),
         this.statsGrid(s),
         h(
           'div',
@@ -789,24 +809,24 @@ export class UI {
         h(
           'div',
           { class: 'howto' },
-          h('p', null, 'Lead a band of seven wanderers from a single campfire to a thriving civilisation, and raise the Sunspire — a wonder for the ages. Time flows on its own: your job is to guide your people.'),
-          h('h3', null, '1 · Put people to work'),
-          h('ul', null, h('li', null, 'Open the People tab and use + / − to choose how many adults do each job. New adults fill open jobs automatically.'), h('li', null, 'Gatherers, hunters and later farmers keep everyone fed. Scholars produce knowledge.')),
-          h('h3', null, '2 · Survive the seasons'),
-          h('ul', null, h('li', null, 'Each year has four seasons. In winter little food grows and everyone burns firewood. Stockpile before it comes!'), h('li', null, 'If food or firewood runs out, people starve or freeze.')),
-          h('h3', null, '3 · Build and expand'),
-          h('ul', null, h('li', null, 'In the Build tab, pick a building and click a glowing tile inside your territory (dashed border). Gold tiles give a bonus.'), h('li', null, 'Every building extends your territory. Huts give room for families to grow.'), h('li', null, 'Builders raise construction sites. Idle adults help a little.')),
-          h('h3', null, '4 · Explore'),
-          h('ul', null, h('li', null, 'Scouts reveal the map. Click any dark area to send them there.'), h('li', null, 'Ruins hold knowledge, caches hold supplies, and wanderer camps may join you.')),
-          h('h3', null, '5 · Discover and advance'),
-          h('ul', null, h('li', null, 'Spend knowledge in the Research tab. Advance through five ages, from Embers to Wonders.'), h('li', null, 'Follow the goal card at the top-left — it leads you all the way to victory.')),
+          h('p', null, 'Lead a band of eight wanderers from a single campfire to a thriving civilisation, and raise the Sunspire — a wonder for the ages.'),
+          h('h3', null, '1 · You decide, the council acts'),
+          h('ul', null, h('li', null, 'The game runs by itself: your council assigns work, raises buildings and pursues discoveries every day — even while you are away.'), h('li', null, 'Your job is to set the direction in the Decide tab. Nothing ever waits for you, but good decisions make your people thrive.')),
+          h('h3', null, '2 · Choose your path'),
+          h('ul', null, h('li', null, 'Start by choosing your people\u2019s Founding Way.'), h('li', null, 'When your settlement is ready for a new age, a Crossroads opens: pick one of three permanent paths to enter it. Five ages lead from Embers to Wonders.')),
+          h('h3', null, '3 · Steer with focus and policies'),
+          h('ul', null, h('li', null, 'Council Focus decides what comes first: growth, industry, knowledge or exploration.'), h('li', null, 'Policies are trade-offs — rations, working hours, families, strangers and more. They can be changed once per season.'), h('li', null, 'Milestones unlock new policies and council settings as your settlement grows.')),
+          h('h3', null, '4 · Survive the seasons'),
+          h('ul', null, h('li', null, 'Winter brings little food and bitter cold. The council stockpiles; raise the winter reserve if people go hungry.')),
+          h('h3', null, '5 · Explore and build'),
+          h('ul', null, h('li', null, 'Click any dark area of the map to send scouts there. Ruins, caches, wanderer camps and sacred groves await.'), h('li', null, 'Want a building somewhere specific? Commission it in the Build tab and click a glowing tile.'), h('li', null, 'Raise the Sunspire to win. Events and choices pop up along the way; they decide themselves if you ignore them.')),
           h('h3', null, 'Controls'),
           h(
             'ul',
             null,
             h('li', null, 'Drag to pan · scroll / pinch to zoom · ', h('span', { class: 'kbd' }, 'WASD'), ' pan'),
             h('li', null, h('span', { class: 'kbd' }, 'Space'), ' pause · ', h('span', { class: 'kbd' }, '1'), h('span', { class: 'kbd' }, '2'), h('span', { class: 'kbd' }, '3'), ' speed · ', h('span', { class: 'kbd' }, 'H'), ' home · ', h('span', { class: 'kbd' }, 'Esc'), ' cancel / menu'),
-            h('li', null, 'Shift-click: place several buildings, or change jobs by 5'),
+            h('li', null, 'Shift-click: commission several buildings in a row'),
           ),
           h('p', { style: 'color:var(--muted);font-size:13px' }, 'Your game saves automatically. While you are away, time passes at half speed (up to 12 years).'),
         ),
@@ -845,6 +865,7 @@ export class UI {
       else if (e.key === '2') this.game.setSpeed(2);
       else if (e.key === '3') this.game.setSpeed(5);
       else if (e.key === 'h' || e.key === 'H') this.centerHearth();
+      else if (e.key === 'e' || e.key === 'E') this.panels.setTab('decide');
       else if (e.key === 'p' || e.key === 'P') this.panels.setTab('people');
       else if (e.key === 'b' || e.key === 'B') this.panels.setTab('build');
       else if (e.key === 'r' || e.key === 'R') this.panels.setTab('research');

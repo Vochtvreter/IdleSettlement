@@ -29,7 +29,7 @@ describe('map generation', () => {
         if (Math.hypot(tx(i) - tx(map.start), ty(i) - ty(map.start)) <= 5) near = true;
       }
       expect(near, `seed ${seed}`).toBe(true);
-      expect(s.settlers.length).toBe(7);
+      expect(s.settlers.length).toBe(8);
     }
   });
 });
@@ -109,5 +109,42 @@ describe('saving', () => {
     const s2 = newGame(9, 0, 0);
     const r2 = simulateOffline(s2, 1000 * 60 * 60 * 24)!;
     expect(r2.days).toBe(480);
+  });
+});
+
+describe('decisions', () => {
+  it('era paths are gated by requirements and are permanent', async () => {
+    const { decide } = await import('../src/game/decisions');
+    const s = newGame(31, 0, 0);
+    expect(decide(s, 'path1', 'tillers', [], research).ok).toBe(false); // not ready
+    expect(decide(s, 'way', 'hunt').ok).toBe(true);
+    expect(decide(s, 'way', 'grove').ok).toBe(false); // permanent
+    s.techs.push('stone_tools');
+    while (s.settlers.length < 14) s.settlers.push({ ...s.settlers[1], id: 1000 + s.settlers.length });
+    s.res.knowledge = 100;
+    s.res.wood = 100;
+    expect(decide(s, 'path1', 'tillers', [], research).ok).toBe(true);
+    expect(s.techs).toContain('era_village');
+  });
+
+  it('policies unlock with milestones, take effect and have a cooldown', async () => {
+    const { decide, fxMul, fxAdd } = await import('../src/game/decisions');
+    const s = newGame(32, 0, 0);
+    expect(decide(s, 'rations', 'strict').ok).toBe(false); // locked until the first winter
+    s.objective = 1;
+    expect(decide(s, 'rations', 'strict').ok).toBe(true);
+    expect(fxMul(s, 'foodUse')).toBeCloseTo(0.8);
+    expect(fxAdd(s, 'morale')).toBe(-8);
+    expect(decide(s, 'rations', 'generous').ok).toBe(false); // cooldown
+    s.day += 10;
+    expect(decide(s, 'rations', 'generous').ok).toBe(true);
+  });
+
+  it('the council keeps a fresh camp fed and building on its own', () => {
+    const s = newGame(33, 0, 0);
+    for (let i = 0; i < DAYS_PER_YEAR * 4; i++) tick(s, ctx());
+    expect(s.defeat).toBe(false);
+    expect(s.buildings.filter((b) => b.done).length).toBeGreaterThan(3);
+    expect(s.techs.length).toBeGreaterThan(0);
   });
 });

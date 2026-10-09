@@ -9,6 +9,8 @@ import {
   MAP_W,
 } from './data';
 import { derived, invalidate, jobUnlocked } from './derived';
+import { runCouncil } from './council';
+import { fxAdd, fxMul } from './decisions';
 import { resolveChoice, rollEvent } from './events';
 import { getMap, idx, inBounds, N4, tx, ty } from './map';
 import { checkObjectives } from './objectives';
@@ -105,7 +107,35 @@ export function techMult(state: GameState, j: JobId): number {
       if (h('medicine')) m += 0.5;
       break;
   }
-  return m;
+  return m * fxMul(state, j);
+}
+
+/** Total output units for n workers of a job (before the job's base rate). season -1 = yearly average. */
+export function jobOutput(state: GameState, j: JobId, n: number, season: number): number {
+  if (n <= 0) return 0;
+  const sm = season < 0 ? (SEASON_MULT[j] ? SEASON_MULT[j]!.reduce((a, b) => a + b, 0) / 4 : 1) : (SEASON_MULT[j]?.[season] ?? 1);
+  const prodMult = productivity(state) * legacyMult(state);
+  return n * sm * techMult(state, j) * slotMult(state, j, n) * prodMult * (JOB_DEFS[j].usesTools ? toolBonus(state) : 1) * modMult(state, j);
+}
+
+/** Base daily rate of a job's main product. */
+export function baseRate(j: JobId): number {
+  const o = JOB_DEFS[j].output;
+  const v = Object.values(o)[0];
+  return v ?? 1;
+}
+
+/** Work needed to finish a building, after decision effects. */
+export function buildWork(state: GameState, type: BuildingId): number {
+  const w = BUILDING_DEFS[type].work;
+  return type === 'monument' ? Math.round(w * fxMul(state, 'monumentWork')) : w;
+}
+
+export function buildMaterials(state: GameState, type: BuildingId): Partial<Record<ResourceId, number>> | undefined {
+  const m = BUILDING_DEFS[type].materials;
+  if (!m) return undefined;
+  const f = type === 'monument' ? fxMul(state, 'monumentMat') : 1;
+  return Object.fromEntries(Object.entries(m).map(([k, v]) => [k, Math.round((v ?? 0) * f)]));
 }
 
 /** Average building multiplier for the first n workers of a job (best buildings fill first). */
@@ -134,7 +164,7 @@ function featuresInTerritory(state: GameState, f: F): number {
 }
 
 export function gathererCapacity(state: GameState) {
-  return 10 + 2 * featuresInTerritory(state, F.Berries) + 2 * featuresInTerritory(state, F.Fish);
+  return Math.round((10 + 2 * featuresInTerritory(state, F.Berries) + 2 * featuresInTerritory(state, F.Fish)) * fxMul(state, 'forage'));
 }
 
 /** Assign adults to jobs according to targets and available slots. Keeps existing assignments stable. */
@@ -177,6 +207,10 @@ export interface PopSummary {
   jobs: Record<JobId, number>;
 }
 
+export function foodDemand(state: GameState, pop: { adults: number; children: number; elders: number }) {
+  return (pop.adults * 0.9 + pop.children * 0.5 + pop.elders * 0.7) * fxMul(state, 'foodUse');
+}
+
 export function popSummary(state: GameState): PopSummary {
   const jobs = Object.fromEntries(JOBS.map((j) => [j, 0])) as Record<JobId, number>;
   let children = 0;
@@ -202,7 +236,7 @@ function add(rates: Rates | undefined, kind: 'prod' | 'cons', r: ResourceId, src
 }
 
 export function lifeShift(state: GameState) {
-  return hasTech(state, 'medicine') ? 9 : 0;
+  return (hasTech(state, 'medicine') ? 9 : 0) + fxAdd(state, 'life');
 }
 
 /** Annual mortality hazard for a given age. */
@@ -234,6 +268,7 @@ export function moraleTarget(state: GameState, hungerNow: number, coldNow: numbe
   m -= 25 * coldNow;
   m -= Math.min(25, (homeless / Math.max(1, pop)) * 60);
   m += modAdd(state, 'morale');
+  m += fxAdd(state, 'morale');
   return Math.max(0, Math.min(100, m));
 }
 
@@ -246,16 +281,13 @@ export function tick(state: GameState, ctx: TickContext) {
   const season = seasonIndex(state.day);
   state.modifiers = state.modifiers.filter((m) => m.until > state.day);
 
+  runCouncil(state, ctx);
   const d = derived(state);
   const jobs = assignJobs(state);
   const pop = popSummary(state);
 
   const prodMult = productivity(state) * legacyMult(state);
-  const tools = toolBonus(state);
-  const out = (j: JobId, n: number) => {
-    const sm = SEASON_MULT[j]?.[season] ?? 1;
-    return n * sm * techMult(state, j) * slotMult(state, j, n) * prodMult * (JOB_DEFS[j].usesTools ? tools : 1) * modMult(state, j);
-  };
+  const out = (j: JobId, n: number) => jobOutput(state, j, n, season);
 
   const gain: Partial<Record<ResourceId, number>> = {};
   const produce = (r: ResourceId, src: string, amt: number) => {
@@ -279,8 +311,9 @@ export function tick(state: GameState, ctx: TickContext) {
   produce('ore', 'Miners', out('miner', jobs.miner) * 0.38);
   const pastures = d.counts.pasture ?? 0;
   if (pastures) {
-    produce('food', 'Pastures', pastures * 1.6 * (season === 3 ? 0.6 : 1) * legacyMult(state));
-    produce('hides', 'Pastures', pastures * 0.15 * legacyMult(state));
+    const pm = legacyMult(state) * fxMul(state, 'pasture');
+    produce('food', 'Pastures', pastures * 1.6 * (season === 3 ? 0.6 : 1) * pm);
+    produce('hides', 'Pastures', pastures * 0.15 * pm);
   }
   {
     // Smiths are limited by ore and wood on hand.
@@ -298,14 +331,15 @@ export function tick(state: GameState, ctx: TickContext) {
   }
   {
     const libs = d.counts.library ?? 0;
-    const k = out('scholar', jobs.scholar) * 0.26 * (1 + 0.1 * libs);
+    const kf = fxMul(state, 'knowledge');
+    const k = out('scholar', jobs.scholar) * 0.26 * (1 + 0.1 * libs) * kf;
     produce('knowledge', 'Scholars', k);
-    const elderK = pop.elders * (hasTech(state, 'oral_tradition') ? 0.08 : 0.03) * legacyMult(state);
+    const elderK = pop.elders * (hasTech(state, 'oral_tradition') ? 0.08 : 0.03) * legacyMult(state) * kf;
     produce('knowledge', 'Elders', elderK);
   }
 
   // --- consumption
-  const foodNeed = pop.adults * 0.9 + pop.children * 0.5 + pop.elders * 0.7;
+  const foodNeed = foodDemand(state, pop);
   add(rates, 'cons', 'food', 'Eating', foodNeed);
   let heatNeed = 0;
   if (season === 3) {
@@ -314,7 +348,7 @@ export function tick(state: GameState, ctx: TickContext) {
     add(rates, 'cons', 'wood', 'Firewood', heatNeed);
   }
   const toolUsers = JOBS.filter((j) => JOB_DEFS[j].usesTools).reduce((s, j) => s + jobs[j], 0);
-  const toolWear = state.res.tools >= 1 ? toolUsers * 0.006 : 0;
+  const toolWear = state.res.tools >= 1 ? toolUsers * 0.006 * fxMul(state, 'toolWear') : 0;
   if (toolWear) add(rates, 'cons', 'tools', 'Wear', toolWear);
 
   // --- apply
@@ -345,22 +379,24 @@ export function tick(state: GameState, ctx: TickContext) {
     for (const b of state.buildings) {
       if (b.done || left <= 0) continue;
       const def = BUILDING_DEFS[b.type];
-      const need = def.work - b.progress;
-      const used = Math.min(need, left, materialLimit(state, b.type));
-      if (def.materials) {
-        for (const [r, amt] of Object.entries(def.materials)) {
+      const total = buildWork(state, b.type);
+      const mats = buildMaterials(state, b.type);
+      const need = total - b.progress;
+      const used = Math.max(0, Math.min(need, left, materialLimit(state, b.type)));
+      if (mats) {
+        for (const [r, amt] of Object.entries(mats)) {
           const k = r as ResourceId;
-          const take = ((amt ?? 0) / def.work) * used;
+          const take = ((amt ?? 0) / total) * used;
           state.res[k] = Math.max(0, state.res[k] - take);
           add(rates, 'cons', k, def.name, take);
         }
       }
       b.progress += used;
       left -= used;
-      if (used < need && def.materials && left > 0) break; // stalled for materials: don't skip ahead in the queue
-      if (b.progress >= def.work - 1e-9) {
+      if (used < need && mats && left > 0) continue; // stalled for materials: let other sites use the hands
+      if (b.progress >= total - 1e-9) {
         b.done = true;
-        b.progress = def.work;
+        b.progress = total;
         state.stats.buildingsBuilt++;
         invalidate(state);
         ctx.fx.push({ kind: 'built', building: b.id });
@@ -390,7 +426,7 @@ export function tick(state: GameState, ctx: TickContext) {
     const housingF = free <= 0 ? 0 : Math.min(1, free / 3);
     const foodF = state.hunger > 0.05 ? 0.1 : state.res.food < state.settlers.length * 3 ? 0.5 : 1;
     const moraleF = Math.max(0.25, Math.min(1.4, state.morale / 55));
-    const rate = (0.3 / DAYS_PER_YEAR) * housingF * foodF * moraleF * modMult(state, 'births');
+    const rate = (0.3 / DAYS_PER_YEAR) * housingF * foodF * moraleF * modMult(state, 'births') * fxMul(state, 'births');
     const mothers = state.settlers.filter((s) => s.f && ageOf(state, s) >= 16 && ageOf(state, s) < 42);
     for (const mother of mothers) {
       if (!rng.chance(rate)) continue;
@@ -449,11 +485,12 @@ export function tick(state: GameState, ctx: TickContext) {
 
 /** How much work the stockpile can currently support for a site that consumes materials as it rises. */
 export function materialLimit(state: GameState, type: BuildingId): number {
-  const def = BUILDING_DEFS[type];
-  if (!def.materials) return Infinity;
+  const mats = buildMaterials(state, type);
+  if (!mats) return Infinity;
+  const work = buildWork(state, type);
   let lim = Infinity;
-  for (const [r, amt] of Object.entries(def.materials)) {
-    const per = (amt ?? 0) / def.work;
+  for (const [r, amt] of Object.entries(mats)) {
+    const per = (amt ?? 0) / work;
     if (per > 0) lim = Math.min(lim, state.res[r as ResourceId] / per);
   }
   return lim;
@@ -563,14 +600,14 @@ function discover(state: GameState, ctx: TickContext, rng: Rng, i: number, f: F)
   const claim = () => state.claimed.push(i);
   switch (f) {
     case F.Ruins: {
-      const k = Math.round(15 + era * 35 + rng.int(0, 10));
+      const k = Math.round((15 + era * 35 + rng.int(0, 10)) * fxMul(state, 'discovery'));
       state.res.knowledge += k;
       claim();
       log(state, `Scouts uncovered ancient ruins covered in strange carvings. (+${k} knowledge)`, 'discovery');
       break;
     }
     case F.Tribe: {
-      const n = rng.int(2, 4);
+      const n = Math.round(rng.int(2, 4) * fxMul(state, 'discovery'));
       addSettlers(state, ctx, rng, n, 14, 36);
       claim();
       log(state, `Scouts met a band of ${n} wanderers who agreed to join ${state.name}!`, 'discovery');
@@ -579,7 +616,7 @@ function discover(state: GameState, ctx: TickContext, rng: Rng, i: number, f: F)
     case F.Cache: {
       const caps = derived(state).caps;
       const r = rng.pick(['wood', 'stone', 'food', 'hides'] as const);
-      const amt = Math.round((r === 'hides' ? 15 : 40) * (1 + era * 0.8));
+      const amt = Math.round((r === 'hides' ? 15 : 40) * (1 + era * 0.8) * fxMul(state, 'discovery'));
       state.res[r] = Math.min(caps[r], state.res[r] + amt);
       claim();
       log(state, `Scouts found a forgotten cache of supplies. (+${amt} ${r})`, 'discovery');

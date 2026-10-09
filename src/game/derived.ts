@@ -1,5 +1,6 @@
 import { BUILDABLE, BUILDING_DEFS, JOB_DEFS, MAP_H, MAP_W, OPEN_LAND, RESOURCE_DEFS } from './data';
 import { getMap, idx, inBounds, tx, ty } from './map';
+import { fxMul } from './decisions';
 import { eraOf, hasTech } from './state';
 import type { Building, BuildingId, GameState, JobId, ResourceId, Resources } from './types';
 import { F, JOBS, RESOURCES, T } from './types';
@@ -26,7 +27,7 @@ const memo = new WeakMap<GameState, { key: string; d: Derived }>();
 function keyOf(state: GameState) {
   let done = 0;
   for (const b of state.buildings) if (b.done) done++;
-  return `${state.buildings.length}:${done}:${state.techs.length}:${state.claimed.length}:${state.nextBuildingId}`;
+  return `${state.buildings.length}:${done}:${state.techs.length}:${state.claimed.length}:${state.nextBuildingId}:${Object.values(state.decisions).join()}`;
 }
 
 /** Values that only change when buildings, techs or discoveries change. Memoised per state. */
@@ -78,6 +79,11 @@ function compute(state: GameState): Derived {
       slotGroups[job as JobId].push({ mult: buildingMult(state, b), count: n!, building: b.id });
     }
   }
+
+  // Decision effects on storage.
+  const store = fxMul(state, 'storage');
+  for (const r of RESOURCES) if (isFinite(caps[r])) caps[r] = Math.round(caps[r] * store);
+  caps.food = Math.round(caps.food * fxMul(state, 'foodStore'));
 
   const slots = {} as Record<JobId, number>;
   for (const j of JOBS) {

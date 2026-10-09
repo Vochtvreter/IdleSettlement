@@ -3,7 +3,8 @@ import { DAYS_PER_YEAR } from '../src/game/data';
 import { newGame, eraOf, seasonIndex } from '../src/game/state';
 import { emptyRates, popSummary, tick, type TickContext } from '../src/game/sim';
 import { derived } from '../src/game/derived';
-import { botStep } from './autoplayer';
+import { decider } from './autoplayer';
+const botStep = decider({ picks: [0, 1, 2, 0, 1] });
 
 const SEED = Number(process.env.TRACE_SEED ?? 0);
 it.skipIf(!SEED)('trace', () => {

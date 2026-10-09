@@ -170,11 +170,11 @@ export const BUILDING_DEFS: Record<BuildingId, BuildingDef> = {
     cost: {},
     work: 0,
     rule: 'land',
-    housing: 8,
+    housing: 10,
     slots: { hunter: 2, woodcutter: 2, scholar: 2, scout: 2 },
     territory: 5,
     max: 1,
-    benefit: 'Housing 8',
+    benefit: 'Housing 10',
   },
   hut: {
     name: 'Hut',
@@ -435,34 +435,6 @@ export const TECH_DEFS: Record<TechId, TechDef> = {
 };
 
 export const TECH_ORDER = Object.keys(TECH_DEFS) as TechId[];
-
-export interface ObjectiveDef {
-  text: string;
-  /** Short hint describing how to make progress. */
-  hint: string;
-  reward?: Cost;
-}
-
-/** Guided objectives that lead a new player from first fire to the Sunspire. Checks live in objectives.ts. */
-export const OBJECTIVES: ObjectiveDef[] = [
-  { text: 'Put 4 people to work finding food', hint: 'In the People tab, press + next to Gatherers or Hunters.', reward: { food: 20 } },
-  { text: 'Build a Hut', hint: 'Open Build, pick Hut, then click a tile inside your territory.', reward: { wood: 15 } },
-  { text: 'Research Stone Tools', hint: 'Scholars produce knowledge. Spend it in the Research tab.', reward: { knowledge: 5 } },
-  { text: 'Build a Lumber Camp beside a forest', hint: 'Each adjacent forest tile boosts it.', reward: { wood: 20 } },
-  { text: 'Build a Quarry', hint: 'Quarries go on hills or next to mountains. Scouts reveal more land.', reward: { stone: 15 } },
-  { text: 'Grow to 14 people', hint: 'Births need free housing, food and good morale.', reward: { food: 40 } },
-  { text: 'Enter the Age of Fields', hint: 'Research Village Life.', reward: { knowledge: 15 } },
-  { text: 'Build 2 Farms', hint: 'Farms by rivers or lakes yield more. Stock food for winter!', reward: { food: 60 } },
-  { text: 'Build a Granary', hint: 'Research Pottery first.', reward: { stone: 30 } },
-  { text: 'Grow to 28 people', hint: 'Keep building homes.', reward: { wood: 60 } },
-  { text: 'Enter the Age of Bronze', hint: 'Research Chiefdom.', reward: { knowledge: 40 } },
-  { text: 'Build a Mine', hint: 'Mines on ore veins are twice as productive.', reward: { ore: 20 } },
-  { text: 'Build a Smithy and forge 20 tools', hint: 'Smiths need ore and wood.', reward: { tools: 10 } },
-  { text: 'Enter the Age of Iron', hint: 'Research Township (needs Bronze Working & Writing).', reward: { knowledge: 80 } },
-  { text: 'Enter the Age of Wonders', hint: 'Research Golden Age.', reward: { stone: 200 } },
-  { text: 'Research Architecture', hint: 'The final discovery.', reward: { tools: 30 } },
-  { text: 'Complete the Sunspire', hint: 'Place it, stockpile materials and assign many builders.' },
-];
 
 export const TERRAIN_NAMES: Record<number, string> = {
   [T.Deep]: 'Deep Water',

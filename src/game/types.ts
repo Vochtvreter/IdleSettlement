@@ -176,7 +176,17 @@ export interface GameState {
   modifiers: Modifier[];
   log: LogEntry[];
   choice: PendingChoice | null;
+  /** Index of the next milestone to complete. */
   objective: number;
+  /** Chosen option per decision id (focus, policies and paths). */
+  decisions: Record<string, string>;
+  /** Day each policy was last changed (for the cooldown). */
+  decidedDay: Record<string, number>;
+  tweaks: Partial<Record<'reserve' | 'housing' | 'scouts' | 'builders', number>>;
+  /** Which areas the council manages automatically. */
+  council: { jobs: boolean; build: boolean; research: boolean };
+  /** Discovery the council should research next. */
+  pin: TechId | null;
   victory: boolean;
   defeat: boolean;
   legacy: number;

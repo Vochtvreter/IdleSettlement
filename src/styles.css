@@ -1359,11 +1359,10 @@ button {
   }
   #map {
     top: var(--hud-h);
-    bottom: 46vh;
-    height: auto;
+    height: calc(100% - var(--hud-h) - 46vh);
   }
   #app.sheet-collapsed #map {
-    bottom: 52px;
+    height: calc(100% - var(--hud-h) - 52px);
   }
   #app.placing #inspector {
     display: none !important;
@@ -1453,4 +1452,267 @@ button {
   #date .txt {
     display: none;
   }
+}
+
+/* ------------------------------------------------------------------ decisions */
+.path-card {
+  position: relative;
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 2px solid var(--line-2);
+  border-radius: 6px;
+  background: linear-gradient(rgba(255, 255, 255, 0.04), rgba(0, 0, 0, 0.2));
+}
+.path-card.ready {
+  border-color: var(--ember);
+  background: linear-gradient(rgba(255, 179, 71, 0.16), rgba(0, 0, 0, 0.2));
+  box-shadow: 0 0 0 2px rgba(255, 179, 71, 0.18), 0 0 24px rgba(255, 160, 60, 0.18);
+  animation: glow 2.4s ease-in-out infinite;
+}
+@keyframes glow {
+  50% {
+    box-shadow: 0 0 0 2px rgba(255, 179, 71, 0.35), 0 0 32px rgba(255, 160, 60, 0.32);
+  }
+}
+.path-card .kicker {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 1px;
+  color: var(--ember);
+  text-transform: uppercase;
+}
+.path-card .pt {
+  font-size: 20px;
+  color: var(--gold);
+  margin: 2px 0;
+}
+.path-card .pp {
+  font-size: 13px;
+  color: #ddd3e8;
+  line-height: 1.35;
+}
+.path-card .reqs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 8px 0 4px;
+  font-size: 12px;
+}
+.path-card .reqs .ok {
+  color: var(--good);
+}
+.path-card .reqs .no {
+  color: var(--bad);
+}
+.path-card .note {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 6px 0 8px;
+}
+.path-card .note.good {
+  color: var(--good);
+}
+.path-card .opts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.opt {
+  text-align: left;
+  padding: 8px 10px;
+  border: 2px solid #0a0710;
+  border-radius: 5px;
+  background: linear-gradient(#3d3052, #2b2140);
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  transition: transform 0.06s, filter 0.1s, border-color 0.1s;
+}
+.opt:hover:not(:disabled) {
+  border-color: var(--ember);
+  filter: brightness(1.12);
+}
+.opt:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.opt:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.opt .on {
+  font-size: 16px;
+  color: var(--gold);
+}
+.opt .od {
+  font-size: 12px;
+  color: #d5cbe0;
+}
+.story {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.chapter {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 9px;
+  border-left: 3px solid var(--gold);
+  background: rgba(255, 210, 94, 0.07);
+  border-radius: 3px;
+  cursor: help;
+}
+.chapter .cn {
+  font-size: 14px;
+}
+.chapter .cd {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--muted);
+  align-self: center;
+  text-align: right;
+}
+.seg {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.seg-btn {
+  flex: 1 1 auto;
+  padding: 6px 8px;
+  border: 2px solid #0a0710;
+  border-radius: 4px;
+  background: linear-gradient(#352a48, #281f37);
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.07);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--muted);
+}
+.seg-btn:hover:not(:disabled) {
+  color: var(--text);
+  filter: brightness(1.15);
+}
+.seg-btn.sel {
+  background: linear-gradient(#ffb347, #e8792f);
+  color: #2a1606;
+}
+.seg-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.policy {
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  background: rgba(0, 0, 0, 0.22);
+  border: 2px solid #2b2139;
+  border-radius: 4px;
+}
+.policy.locked {
+  opacity: 0.6;
+  border-style: dashed;
+}
+.policy .pn {
+  font-size: 15px;
+}
+.policy .pq,
+.toggle-row .pq {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.policy .pe {
+  font-size: 12px;
+  color: var(--good);
+  margin-top: 5px;
+}
+.policy .cd {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--dim);
+  margin-top: 3px;
+}
+.policy .tv {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--gold);
+}
+.lock {
+  font-size: 11px;
+  color: var(--dim);
+}
+.hint-line {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.council-note {
+  font-size: 12px;
+  color: #c9dff0;
+  padding: 7px 9px;
+  margin-bottom: 8px;
+  border-radius: 4px;
+  background: rgba(108, 192, 234, 0.08);
+  border: 1px solid rgba(108, 192, 234, 0.3);
+  line-height: 1.35;
+}
+.council-note .link-btn {
+  color: var(--gold);
+  font-size: 12px;
+}
+.slider {
+  width: 100%;
+  accent-color: var(--ember);
+}
+.toggle-row {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+#objective .cta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 8px;
+  padding: 6px 8px;
+  border: 2px solid var(--ember);
+  border-radius: 4px;
+  background: rgba(255, 179, 71, 0.15);
+  color: var(--gold);
+  cursor: pointer;
+  font-size: 13px;
+  animation: glow 2.4s ease-in-out infinite;
+}
+.era-banner {
+  position: absolute;
+  top: 26%;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  width: min(520px, calc(100vw - 24px));
+  padding: 18px 22px;
+  text-align: center;
+  border-color: var(--gold);
+  cursor: pointer;
+  animation: rise 0.5s ease-out;
+}
+.era-banner.out {
+  animation: toastOut 0.6s forwards;
+}
+.era-banner .kicker {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: var(--ember);
+  text-transform: uppercase;
+}
+.era-banner .en {
+  font-size: 30px;
+  color: var(--gold);
+  text-shadow: 0 3px 0 #0a0710;
+}
+.era-banner .eb {
+  font-size: 14px;
+  color: #ddd3e8;
+  margin: 4px 0 10px;
+}
+.era-banner .unlocks {
+  justify-content: center;
 }

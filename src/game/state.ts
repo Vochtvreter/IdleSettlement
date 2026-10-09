@@ -5,7 +5,7 @@ import { Rng } from './rng';
 import type { GameState, JobId, Resources, Settler, TechId } from './types';
 import { JOBS, RESOURCES } from './types';
 
-export const SAVE_VERSION = 3;
+export const SAVE_VERSION = 4;
 
 export function emptyResources(): Resources {
   return Object.fromEntries(RESOURCES.map((r) => [r, 0])) as Resources;
@@ -41,6 +41,11 @@ export function newGame(seed: number, legacy = 0, now = Date.now()): GameState {
     log: [],
     choice: null,
     objective: 0,
+    decisions: { focus: 'balanced' },
+    decidedDay: {},
+    tweaks: {},
+    council: { jobs: true, build: true, research: true },
+    pin: null,
     victory: false,
     defeat: false,
     legacy,
@@ -63,9 +68,10 @@ export function newGame(seed: number, legacy = 0, now = Date.now()): GameState {
 
   const founders: [number, boolean][] = [
     [54, false],
-    [33, true],
-    [29, false],
-    [24, true],
+    [36, true],
+    [31, false],
+    [27, true],
+    [23, false],
     [19, true],
     [17, false],
     [5, true],
@@ -88,7 +94,7 @@ export function newGame(seed: number, legacy = 0, now = Date.now()): GameState {
   state.log.push({
     day: 0,
     kind: 'era',
-    text: `Seven wanderers light a fire and name this place ${state.name}. The Age of Embers begins.`,
+    text: `Eight wanderers light a fire and name this place ${state.name}. The Age of Embers begins.`,
   });
   return state;
 }
