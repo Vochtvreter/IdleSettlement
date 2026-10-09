@@ -1,7 +1,7 @@
 name: Deploy to GitHub Pages
 
-# Publishes whenever the repository's default branch changes (whatever it is named),
-# or on demand from the Actions tab.
+# Publishes whenever main or the repository's default branch changes, or on demand
+# from the Actions tab.
 on:
   push:
   workflow_dispatch:
@@ -17,7 +17,10 @@ concurrency:
 
 jobs:
   build:
-    if: github.event_name == 'workflow_dispatch' || github.ref_name == github.event.repository.default_branch
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.ref_name == 'main' ||
+      github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

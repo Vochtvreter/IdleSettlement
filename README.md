@@ -65,10 +65,13 @@ The build is fully static with relative paths, so `dist/` can be hosted anywhere
 
 ### Publishing on GitHub Pages
 
-`.github/workflows/deploy.yml` builds the game and publishes it whenever the repository's default branch changes.
-One-time setup: in the repository go to **Settings → Pages** and set **Source** to **GitHub Actions**. Then push to
-the default branch, or open **Actions → Deploy to GitHub Pages → Run workflow**. The game will be live at
+`.github/workflows/deploy.yml` builds the game and publishes it whenever `main` or the repository's default branch
+changes. One-time setup: in the repository go to **Settings → Pages** and set **Source** to **GitHub Actions**. Then
+push to `main`, or open **Actions → Deploy to GitHub Pages → Run workflow**. The game will be live at
 `https://<user>.github.io/<repo>/`.
+
+If the browser console shows `GET https://<user>.github.io/src/main.ts 404`, Pages is set to **Deploy from a branch**
+and is serving the unbuilt source. Switch **Source** to **GitHub Actions** and run the workflow again.
 
 ### Project layout
 
